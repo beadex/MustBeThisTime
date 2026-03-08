@@ -1,0 +1,11 @@
+{
+  "dependencies": [
+    "directx-headers"
+  ],
+   "overrides": [
+    { 
+        "name": "directx-headers", 
+        "version": "1.4.9"
+    }
+  ]
+}
