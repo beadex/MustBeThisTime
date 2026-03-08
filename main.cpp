@@ -1,4 +1,4 @@
-#include "common.h"
+#include "stdafx.h"
 #include "d3dApp.h"
 
 using Microsoft::WRL::ComPtr;

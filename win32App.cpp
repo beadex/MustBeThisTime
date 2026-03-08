@@ -1,4 +1,4 @@
-#include "common.h"
+#include "stdafx.h"
 #include "win32App.h"
 
 HWND Win32Application::m_hwnd = nullptr;
