@@ -42,8 +42,8 @@ private:
 	ComPtr<IDXGISwapChain3> m_swapChain;
 	ComPtr<ID3D12Device> m_device;
 	ComPtr<ID3D12Resource> m_renderTargets[FrameCount];
-	ComPtr<ID3D12CommandAllocator> m_commandAllocator;
-	ComPtr<ID3D12CommandAllocator> m_bundleAllocator;
+	ComPtr<ID3D12CommandAllocator> m_commandAllocators[FrameCount];
+	ComPtr<ID3D12CommandAllocator> m_bundleAllocators[FrameCount];
 	ComPtr<ID3D12CommandQueue> m_commandQueue;
 	ComPtr<ID3D12RootSignature> m_rootSignature;
 	ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
@@ -66,13 +66,14 @@ private:
 	UINT m_frameIndex;
 	HANDLE m_fenceEvent;
 	ComPtr<ID3D12Fence> m_fence;
-	UINT64 m_fenceValue;
+	UINT64 m_fenceValues[FrameCount];
 
 	void LoadPipeline();
 	void LoadAssets();
 	std::vector<UINT8> GenerateTextureData();
 	void PopulateCommandList();
-	void WaitForPreviousFrame();
+	void MoveToNextFrame();
+	void WaitForGpu();
 };
 
 _Use_decl_annotations_
@@ -88,6 +89,7 @@ D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	m_pCbvDataBegin(nullptr),
 	m_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)),
 	m_scissorRect(0, 0, static_cast<LONG>(width), static_cast<LONG>(height)),
+	m_fenceValues {},
 	m_rtvDescriptorSize(0),
 	m_constantBufferData {}
 {
@@ -97,42 +99,6 @@ void D3DAppImpl::OnInit()
 {
 	LoadPipeline();
 	LoadAssets();
-}
-
-void D3DAppImpl::OnUpdate()
-{
-	const float translationSpeed = 0.005f;
-	const float offsetBounds = 1.25f;
-
-	m_constantBufferData.offset.x += translationSpeed;
-	
-	if (m_constantBufferData.offset.x > offsetBounds)
-	{
-		m_constantBufferData.offset.x = -offsetBounds;
-	}
-	memcpy(m_pCbvDataBegin, &m_constantBufferData, sizeof(m_constantBufferData));
-}
-
-void D3DAppImpl::OnRender()
-{
-	// Record all the commands we need to render the scene into the command list.
-	PopulateCommandList();
-
-	// Execute the command list.
-	ID3D12CommandList* ppCommandLists[] = { m_commandList.Get() };
-	m_commandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
-
-	// Present the frame
-	ThrowIfFailed(m_swapChain->Present(1, 0));
-
-	WaitForPreviousFrame();
-}
-
-void D3DAppImpl::OnDestroy()
-{
-	// Ensure that the GPU is no longer referencing resources that are about to be cleaned up by the desctuctor
-	WaitForPreviousFrame();
-	CloseHandle(m_fenceEvent);
 }
 
 void D3DAppImpl::LoadPipeline()
@@ -244,11 +210,11 @@ void D3DAppImpl::LoadPipeline()
 			ThrowIfFailed(m_swapChain->GetBuffer(n, IID_PPV_ARGS(&m_renderTargets[n])));
 			m_device->CreateRenderTargetView(m_renderTargets[n].Get(), nullptr, rtvHandle);
 			rtvHandle.Offset(1, m_rtvDescriptorSize);
+
+			ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocators[n])));
+			ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_BUNDLE, IID_PPV_ARGS(&m_bundleAllocators[n])));
 		}
 	}
-
-	ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocator)));
-	ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_BUNDLE, IID_PPV_ARGS(&m_bundleAllocator)));
 }
 
 void D3DAppImpl::LoadAssets()
@@ -339,7 +305,7 @@ void D3DAppImpl::LoadAssets()
 	}
 
 	// Create the command list.
-	ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocator.Get(), m_pipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
+	ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocators[m_frameIndex].Get(), m_pipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
 
 	// Create the vertex buffer.
 	{
@@ -471,7 +437,7 @@ void D3DAppImpl::LoadAssets()
 
 	// Create a bundle that records vertex/descriptor setup and the draw call.
 	{
-		ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE, m_bundleAllocator.Get(), m_pipelineState.Get(), IID_PPV_ARGS(&m_bundle)));
+		ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE, m_bundleAllocators[m_frameIndex].Get(), m_pipelineState.Get(), IID_PPV_ARGS(&m_bundle)));
 
 		// Record bundle commands. Bundles must NOT perform render target transitions/clears.
 		m_bundle->SetGraphicsRootSignature(m_rootSignature.Get());
@@ -489,8 +455,8 @@ void D3DAppImpl::LoadAssets()
 
 	// Create synchronization objects and wait until assets have been uploaded to the GPU.
 	{
-		ThrowIfFailed(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
-		m_fenceValue = 1;
+		ThrowIfFailed(m_device->CreateFence(m_fenceValues[m_frameIndex], D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
+		m_fenceValues[m_frameIndex]++;
 
 		// Create an event handle to use for frame synchronization
 		m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
@@ -502,7 +468,7 @@ void D3DAppImpl::LoadAssets()
 		// Wait for the command list to execute; we are reusing the same command 
 		// list in our main loop but for now, we just want to wait for setup to 
 		// complete before continuing.
-		WaitForPreviousFrame();
+		WaitForGpu();
 	}
 }
 
@@ -543,17 +509,53 @@ std::vector<UINT8> D3DAppImpl::GenerateTextureData()
 	return data;
 }
 
+void D3DAppImpl::OnUpdate()
+{
+	const float translationSpeed = 0.005f;
+	const float offsetBounds = 1.25f;
+
+	m_constantBufferData.offset.x += translationSpeed;
+
+	if (m_constantBufferData.offset.x > offsetBounds)
+	{
+		m_constantBufferData.offset.x = -offsetBounds;
+	}
+	memcpy(m_pCbvDataBegin, &m_constantBufferData, sizeof(m_constantBufferData));
+}
+
+void D3DAppImpl::OnRender()
+{
+	// Record all the commands we need to render the scene into the command list.
+	PopulateCommandList();
+
+	// Execute the command list.
+	ID3D12CommandList* ppCommandLists[] = { m_commandList.Get() };
+	m_commandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
+
+	// Present the frame
+	ThrowIfFailed(m_swapChain->Present(1, 0));
+
+	MoveToNextFrame();
+}
+
+void D3DAppImpl::OnDestroy()
+{
+	// Ensure that the GPU is no longer referencing resources that are about to be cleaned up by the desctuctor
+	WaitForGpu();
+	CloseHandle(m_fenceEvent);
+}
+
 void D3DAppImpl::PopulateCommandList()
 {
 	// Command list allocators can only be reset when the associated
 	// command lists have finished execution on the GPU; apps should use
 	// fences to determine GPU execution progress.
-	ThrowIfFailed(m_commandAllocator->Reset());
+	ThrowIfFailed(m_commandAllocators[m_frameIndex]->Reset());
 
 	// However, when ExecuteCommandList() is called on a particular command 
 	// list, that command list can then be reset at any time and must be before 
 	// re-recording.
-	ThrowIfFailed(m_commandList->Reset(m_commandAllocator.Get(), m_pipelineState.Get()));
+	ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), m_pipelineState.Get()));
 
 	// Set necessary state
 	m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
@@ -591,24 +593,37 @@ void D3DAppImpl::PopulateCommandList()
 	ThrowIfFailed(m_commandList->Close());
 }
 
-void D3DAppImpl::WaitForPreviousFrame()
+// Wait for pending GPU work to complete.
+void D3DAppImpl::WaitForGpu()
 {
-	// WAITING FOR THE FRAME TO COMPLETE BEFORE CONTINUING IS NOT BEST PRACTICE.
-	// This is code implemented as such for simplicity. The D3D12HelloFrameBuffering
-	// sample illustrates how to use fences for efficient resource usage and to
-	// maximize GPU utilization.
+	// Schedule a Signal command in the queue
+	ThrowIfFailed(m_commandQueue->Signal(m_fence.Get(), m_fenceValues[m_frameIndex]));
 
-	// Signal and increment the fence value.
-	const UINT64 fence = m_fenceValue;
-	ThrowIfFailed(m_commandQueue->Signal(m_fence.Get(), fence));
-	m_fenceValue++;
+	// Wait until the fence has been processed.
+	ThrowIfFailed(m_fence->SetEventOnCompletion(m_fenceValues[m_frameIndex], m_fenceEvent));
+	WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
 
-	// Wait until the previous frame is finished.
-	if (m_fence->GetCompletedValue() < fence)
+	// Increment the fence value for the current frame.
+	m_fenceValues[m_frameIndex]++;
+}
+
+// Prepare to render the next frame.
+void D3DAppImpl::MoveToNextFrame()
+{
+	// Schedule a Signal command in the queue.
+	const UINT64 currentFenceValue = m_fenceValues[m_frameIndex];
+	ThrowIfFailed(m_commandQueue->Signal(m_fence.Get(), currentFenceValue));
+
+	// Update the frame index.
+	m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
+
+	// If the next frame is not ready to be rendered yet, wait until it is ready.
+	if (m_fence->GetCompletedValue() < m_fenceValues[m_frameIndex])
 	{
-		ThrowIfFailed(m_fence->SetEventOnCompletion(fence, m_fenceEvent));
-		WaitForSingleObject(m_fenceEvent, INFINITE);
+		ThrowIfFailed(m_fence->SetEventOnCompletion(m_fenceValues[m_frameIndex], m_fenceEvent));
+		WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
 	}
 
-	m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
+	// Set the fence value for the next frame.
+	m_fenceValues[m_frameIndex] = currentFenceValue + 1;
 }
