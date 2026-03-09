@@ -45,4 +45,7 @@
   <ItemGroup>
     <CustomBuild Include="shaders.hlsl" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+  </ItemGroup>
 </Project>
