@@ -12,10 +12,10 @@ class D3DAppImpl : public D3DApp
 public:
 	D3DAppImpl(UINT width, UINT height, std::wstring name);
 
-	virtual void OnInit();
-	virtual void OnUpdate();
-	virtual void OnRender();
-	virtual void OnDestroy();
+	virtual void OnInit() override;
+	virtual void OnUpdate(const Timer& timer) override;
+	virtual void OnRender(const Timer& timer) override;
+	virtual void OnDestroy() override;
 
 private:
 	static const UINT FrameCount = 2;
@@ -509,7 +509,7 @@ std::vector<UINT8> D3DAppImpl::GenerateTextureData()
 	return data;
 }
 
-void D3DAppImpl::OnUpdate()
+void D3DAppImpl::OnUpdate(const Timer& timer)
 {
 	const float translationSpeed = 0.005f;
 	const float offsetBounds = 1.25f;
@@ -523,7 +523,7 @@ void D3DAppImpl::OnUpdate()
 	memcpy(m_pCbvDataBegin, &m_constantBufferData, sizeof(m_constantBufferData));
 }
 
-void D3DAppImpl::OnRender()
+void D3DAppImpl::OnRender(const Timer& timer)
 {
 	// Record all the commands we need to render the scene into the command list.
 	PopulateCommandList();

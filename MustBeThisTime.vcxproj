@@ -239,6 +239,7 @@
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="d3dApp.h" />
     <ClInclude Include="d3dAppHelper.h" />
+    <ClInclude Include="timer.h" />
     <ClInclude Include="win32App.h" />
   </ItemGroup>
   <ItemGroup>
@@ -250,6 +251,7 @@
     </ClCompile>
     <ClCompile Include="d3dApp.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="timer.cpp" />
     <ClCompile Include="win32App.cpp" />
   </ItemGroup>
   <ItemGroup>

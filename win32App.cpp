@@ -2,6 +2,8 @@
 #include "win32App.h"
 
 HWND Win32Application::m_hwnd = nullptr;
+Timer Win32Application::m_timer = Timer();
+bool Win32Application::m_appPaused = false;
 
 int Win32Application::Run(D3DApp* pApp, HINSTANCE hInstance, int nCmdShow) {
 	int argc;
@@ -10,98 +12,135 @@ int Win32Application::Run(D3DApp* pApp, HINSTANCE hInstance, int nCmdShow) {
 	pApp->ParseCommandLineArgs(argv, argc);
 	LocalFree(argv);
 
-    // Initialize the window class.
-    WNDCLASSEX windowClass = { 0 };
-    windowClass.cbSize = sizeof(WNDCLASSEX);
-    windowClass.style = CS_HREDRAW | CS_VREDRAW;
-    windowClass.lpfnWndProc = WindowProc;
-    windowClass.hInstance = hInstance;
-    windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
-    windowClass.lpszClassName = L"DXSampleClass";
-    RegisterClassEx(&windowClass);
+	// Initialize the window class.
+	WNDCLASSEX windowClass = { 0 };
+	windowClass.cbSize = sizeof(WNDCLASSEX);
+	windowClass.style = CS_HREDRAW | CS_VREDRAW;
+	windowClass.lpfnWndProc = WindowProc;
+	windowClass.hInstance = hInstance;
+	windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+	windowClass.lpszClassName = L"DXSampleClass";
+	RegisterClassEx(&windowClass);
 
-    RECT windowRect = { 0, 0, static_cast<LONG>(pApp->GetWidth()), static_cast<LONG>(pApp->GetHeight()) };
-    AdjustWindowRect(&windowRect, WS_OVERLAPPEDWINDOW, FALSE);
+	RECT windowRect = { 0, 0, static_cast<LONG>(pApp->GetWidth()), static_cast<LONG>(pApp->GetHeight()) };
+	AdjustWindowRect(&windowRect, WS_OVERLAPPEDWINDOW, FALSE);
 
-    // Create the window and store a handle to it.
-    m_hwnd = CreateWindow(
-        windowClass.lpszClassName,
-        pApp->GetTitle(),
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        windowRect.right - windowRect.left,
-        windowRect.bottom - windowRect.top,
-        nullptr,        // We have no parent window.
-        nullptr,        // We aren't using menus.
-        hInstance,
-        pApp);
+	// Create the window and store a handle to it.
+	m_hwnd = CreateWindow(
+		windowClass.lpszClassName,
+		pApp->GetTitle(),
+		WS_OVERLAPPEDWINDOW,
+		CW_USEDEFAULT,
+		CW_USEDEFAULT,
+		windowRect.right - windowRect.left,
+		windowRect.bottom - windowRect.top,
+		nullptr,        // We have no parent window.
+		nullptr,        // We aren't using menus.
+		hInstance,
+		pApp);
 
-    // Initialize the sample. OnInit is defined in each child-implementation of DXSample.
-    pApp->OnInit();
+	// Initialize the D3D App. OnInit is defined in each child-implementation of D3DApp.
+	pApp->OnInit();
 
-    ShowWindow(m_hwnd, nCmdShow);
+	ShowWindow(m_hwnd, nCmdShow);
 
-    // Main sample loop.
-    MSG msg = {};
-    while (msg.message != WM_QUIT)
-    {
-        // Process any messages in the queue.
-        if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
-        {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-    }
+	// Main loop.
+	MSG msg = {};
 
-    pApp->OnDestroy();
+	m_timer.Reset();
 
-    // Return this part of the WM_QUIT message to Windows.
-    return static_cast<char>(msg.wParam);
+	while (msg.message != WM_QUIT)
+	{
+		// Process any messages in the queue.
+		if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+		{
+			TranslateMessage(&msg);
+			DispatchMessage(&msg);
+		}
+		else
+		{
+			m_timer.Tick();
+
+			if (!m_appPaused) {
+				pApp->OnUpdate(m_timer);
+				pApp->OnRender(m_timer);
+			}
+			else
+			{
+				Sleep(100);
+			}
+		}
+	}
+
+	pApp->OnDestroy();
+
+	// Return this part of the WM_QUIT message to Windows.
+	return static_cast<char>(msg.wParam);
 }
 
 // Main message handler for the sample.
 LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    D3DApp* pApp = reinterpret_cast<D3DApp*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+	D3DApp* pApp = reinterpret_cast<D3DApp*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
 
-    switch (message)
-    {
-    case WM_CREATE:
-    {
-        // Save the DXSample* passed in to CreateWindow.
-        LPCREATESTRUCT pCreateStruct = reinterpret_cast<LPCREATESTRUCT>(lParam);
-        SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pCreateStruct->lpCreateParams));
-    }
-    return 0;
+	switch (message)
+	{
+	// WM_ACTIVATE is sent when the window is activated or deactivated.  
+	// We pause the game when the window is deactivated and unpause it 
+	// when it becomes active.  
+	case WM_ACTIVATE:
+		if (LOWORD(wParam) == WA_INACTIVE)
+		{
+			m_appPaused = true;
+			m_timer.Stop();
+		}
+		else
+		{
+			m_appPaused = false;
+			m_timer.Start();
+		}
+		return 0;
 
-    case WM_KEYDOWN:
-        if (pApp)
-        {
-            pApp->OnKeyDown(static_cast<UINT8>(wParam));
-        }
-        return 0;
+	case WM_CREATE:
+	{
+		// Save the D3DApp* passed in to CreateWindow.
+		LPCREATESTRUCT pCreateStruct = reinterpret_cast<LPCREATESTRUCT>(lParam);
+		SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pCreateStruct->lpCreateParams));
+	}
+	return 0;
 
-    case WM_KEYUP:
-        if (pApp)
-        {
-            pApp->OnKeyUp(static_cast<UINT8>(wParam));
-        }
-        return 0;
+	case WM_KEYDOWN:
+		if (pApp)
+		{
+			pApp->OnKeyDown(static_cast<UINT8>(wParam));
+		}
+		return 0;
 
-    case WM_PAINT:
-        if (pApp)
-        {
-            pApp->OnUpdate();
-            pApp->OnRender();
-        }
-        return 0;
+	case WM_KEYUP:
+		if (pApp)
+		{
+			pApp->OnKeyUp(static_cast<UINT8>(wParam));
+		}
+		return 0;
 
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        return 0;
-    }
+	// WM_EXITSIZEMOVE is sent when the user grabs the resize bars.
+	case WM_ENTERSIZEMOVE:
+		m_appPaused = true;
+		m_timer.Stop();
+		return 0;
 
-    // Handle any messages the switch statement didn't.
-    return DefWindowProc(hWnd, message, wParam, lParam);
+	// WM_EXITSIZEMOVE is sent when the user releases the resize bars.
+	// Here we reset everything based on the new window dimensions.
+	case WM_EXITSIZEMOVE:
+		m_appPaused = false;
+		m_timer.Start();
+		return 0;
+
+	case WM_DESTROY:
+		PostQuitMessage(0);
+		return 0;
+	}
+
+	// Handle any messages the switch statement didn't.
+	return DefWindowProc(hWnd, message, wParam, lParam);
 }

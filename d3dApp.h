@@ -2,6 +2,7 @@
 
 #include "d3dAppHelper.h"
 #include "win32App.h"
+#include "timer.h"
 
 class D3DApp
 {
@@ -10,8 +11,8 @@ public:
     virtual ~D3DApp();
 
     virtual void OnInit() = 0;
-    virtual void OnUpdate() = 0;
-    virtual void OnRender() = 0;
+    virtual void OnUpdate(const Timer &timer) = 0;
+    virtual void OnRender(const Timer& timer) = 0;
     virtual void OnDestroy() = 0;
 
     // Samples override the event handlers to handle specific messages.

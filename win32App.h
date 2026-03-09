@@ -1,6 +1,7 @@
 #pragma once
 
 #include "d3dApp.h"
+#include "timer.h"
 
 class D3DApp;
 
@@ -11,6 +12,10 @@ public:
 
 protected:
 	static LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+	static Timer m_timer;
+
+	static bool m_appPaused;
+
 
 private:
 	static HWND m_hwnd;
