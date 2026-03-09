@@ -1,6 +1,9 @@
 #include "stdafx.h"
 #include "d3dApp.h"
 
+extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 619; }
+extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = u8".\\D3D12\\"; }
+
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
 
