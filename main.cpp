@@ -19,9 +19,6 @@ public:
 
 private:
 	static const UINT FrameCount = 2;
-	static const UINT TextureWidth = 256;
-	static const UINT TextureHeight = 256;
-	static const UINT TexturePixelSize = 4;    // The number of bytes used to represent a pixel in the texture.
 
 	struct Vertex
 	{
@@ -75,7 +72,6 @@ private:
 
 	void LoadPipeline();
 	void LoadAssets();
-	std::vector<UINT8> GenerateTextureData();
 	void PopulateCommandList();
 	void MoveToNextFrame();
 	void WaitForGpu();
@@ -84,8 +80,23 @@ private:
 _Use_decl_annotations_
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
+	HRESULT hr = CoInitializeEx(nullptr, COINITBASE_MULTITHREADED);
+	const bool coInitialized = SUCCEEDED(hr);
+
+	if (FAILED(hr) && hr != RPC_E_CHANGED_MODE)
+	{
+		return static_cast<int>(hr);
+	}
+
 	D3DAppImpl app(1280, 720, L"D3D12 Hello Window");
-	return Win32Application::Run(&app, hInstance, nCmdShow);
+	const int exitCode = Win32Application::Run(&app, hInstance, nCmdShow);
+
+	if (coInitialized)
+	{
+		CoUninitialize();
+	}
+
+	return exitCode;
 }
 
 D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
@@ -469,19 +480,28 @@ void D3DAppImpl::LoadAssets()
 	// prematurely destroyed.
 	ComPtr<ID3D12Resource> textureUploadHeap;
 
-	// Create the texture
+	// Create the texture from an image file
 	{
+		const std::wstring texturePath = GetAssetFullPath(L"Textures\\wall.jpg");
+
+		TexMetadata metadata = {};
+		ScratchImage scratchImage;
+
+		ThrowIfFailed(LoadFromWICFile(
+			texturePath.c_str(),
+			WIC_FLAGS_FORCE_RGB,
+			&metadata,
+			scratchImage
+		));
+
 		// Describe and create a Texture2D
-		D3D12_RESOURCE_DESC textureDesc = {};
-		textureDesc.MipLevels = 1;
-		textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-		textureDesc.Width = TextureWidth;
-		textureDesc.Height = TextureHeight;
-		textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-		textureDesc.DepthOrArraySize = 1;
-		textureDesc.SampleDesc.Count = 1;
-		textureDesc.SampleDesc.Quality = 0;
-		textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+			metadata.format,
+			static_cast<UINT64>(metadata.width),
+			static_cast<UINT>(metadata.height),
+			static_cast<UINT16>(metadata.arraySize),
+			static_cast<UINT16>(metadata.mipLevels)
+		);
 
 		ThrowIfFailed(m_device->CreateCommittedResource(
 			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
@@ -492,7 +512,8 @@ void D3DAppImpl::LoadAssets()
 			IID_PPV_ARGS(&m_texture)
 		));
 
-		const UINT64 uploadBufferSize = GetRequiredIntermediateSize(m_texture.Get(), 0, 1);
+		const UINT subresourceCount = static_cast<UINT>(scratchImage.GetImageCount());
+		const UINT64 uploadBufferSize = GetRequiredIntermediateSize(m_texture.Get(), 0, subresourceCount);
 
 		// Create the GPU upload buffer
 		ThrowIfFailed(m_device->CreateCommittedResource(
@@ -504,23 +525,31 @@ void D3DAppImpl::LoadAssets()
 			IID_PPV_ARGS(&textureUploadHeap)
 		));
 
-		// Copy data to the intermediate upload heap and then schedule a copy
-		// from the upload heap to the Texture2D.
-		std::vector<UINT8> texture = GenerateTextureData();
+		std::vector<D3D12_SUBRESOURCE_DATA> subresources;
+		subresources.reserve(subresourceCount);
 
-		D3D12_SUBRESOURCE_DATA textureData = {};
-		textureData.pData = &texture[0];
-		textureData.RowPitch = TextureWidth * TexturePixelSize;
-		textureData.SlicePitch = textureData.RowPitch * TextureHeight;
+		const Image* images = scratchImage.GetImages();
 
-		UpdateSubresources(m_commandList.Get(), m_texture.Get(), textureUploadHeap.Get(), 0, 0, 1, &textureData);
+		for (UINT i = 0; i < subresourceCount; ++i)
+		{
+			D3D12_SUBRESOURCE_DATA subresource = {};
+			subresource.pData = images[i].pixels;
+			subresource.RowPitch = static_cast<LONG_PTR>(images[i].rowPitch);
+			subresource.SlicePitch = static_cast<LONG_PTR>(images[i].slicePitch);
+			subresources.push_back(subresource);
+		}
+
+		UpdateSubresources(m_commandList.Get(), m_texture.Get(), textureUploadHeap.Get(), 0, 0, subresourceCount, subresources.data());
 		m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
 		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-		srvDesc.Format = textureDesc.Format;
+		srvDesc.Format = metadata.format;
 		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-		srvDesc.Texture2D.MipLevels = 1;
+		srvDesc.Texture2D.MostDetailedMip = 0;
+		srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
+		srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+
 		m_device->CreateShaderResourceView(m_texture.Get(), &srvDesc, handle);
 	}
 
@@ -588,43 +617,6 @@ void D3DAppImpl::LoadAssets()
 		// complete before continuing.
 		WaitForGpu();
 	}
-}
-
-// Generate a simple black and white checkerboard texture.
-std::vector<UINT8> D3DAppImpl::GenerateTextureData()
-{
-	const UINT rowPitch = TextureWidth * TexturePixelSize;
-	const UINT cellPitch = rowPitch >> 3;        // The width of a cell in the checkboard texture.
-	const UINT cellHeight = TextureWidth >> 3;    // The height of a cell in the checkerboard texture.
-	const UINT textureSize = rowPitch * TextureHeight;
-
-	std::vector<UINT8> data(textureSize);
-	UINT8* pData = &data[0];
-
-	for (UINT n = 0; n < textureSize; n += TexturePixelSize)
-	{
-		UINT x = n % rowPitch;
-		UINT y = n / rowPitch;
-		UINT i = x / cellPitch;
-		UINT j = y / cellHeight;
-
-		if (i % 2 == j % 2)
-		{
-			pData[n] = 0x00;        // R
-			pData[n + 1] = 0x00;    // G
-			pData[n + 2] = 0x00;    // B
-			pData[n + 3] = 0xff;    // A
-		}
-		else
-		{
-			pData[n] = 0xff;        // R
-			pData[n + 1] = 0xff;    // G
-			pData[n + 2] = 0xff;    // B
-			pData[n + 3] = 0xff;    // A
-		}
-	}
-
-	return data;
 }
 
 void D3DAppImpl::OnUpdate(const Timer& timer)
