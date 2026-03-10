@@ -19,6 +19,7 @@ public:
 
 private:
 	static const UINT FrameCount = 2;
+	static const UINT CubeCount = 10;
 
 	struct Vertex
 	{
@@ -60,7 +61,7 @@ private:
 	D3D12_INDEX_BUFFER_VIEW m_indexBufferView;
 	ComPtr<ID3D12Resource> m_texture;
 	ComPtr<ID3D12Resource> m_constantBuffer;
-	SceneConstantBuffer m_constantBufferData;
+	SceneConstantBuffer m_constantBufferData[CubeCount];
 	ComPtr<ID3D12Resource> m_depthBuffer;
 	UINT8* m_pCbvDataBegin;
 
@@ -208,7 +209,7 @@ void D3DAppImpl::LoadPipeline()
 
 		// Need only one heap for both SRV and CBV
 		D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-		heapDesc.NumDescriptors = 2;
+		heapDesc.NumDescriptors = 1 + CubeCount;
 		heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 		ThrowIfFailed(m_device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_heap)));
@@ -407,16 +408,16 @@ void D3DAppImpl::LoadAssets()
 		{
 			// Front
 			 0,  1,  2,   0,  2,  3,
-			// Back
-			 4,  5,  6,   4,  6,  7,
-			// Left
-			 8,  9, 10,   8, 10, 11,
-			// Right
-			 12, 13, 14,  12, 14, 15,
-			// Top
-			 16, 17, 18,  16, 18, 19,
-			// Bottom
-			 20, 21, 22,  20, 22, 23,
+			 // Back
+			  4,  5,  6,   4,  6,  7,
+			  // Left
+			   8,  9, 10,   8, 10, 11,
+			   // Right
+				12, 13, 14,  12, 14, 15,
+				// Top
+				 16, 17, 18,  16, 18, 19,
+				 // Bottom
+				  20, 21, 22,  20, 22, 23,
 		};
 
 
@@ -471,8 +472,7 @@ void D3DAppImpl::LoadAssets()
 
 	}
 
-	D3D12_CPU_DESCRIPTOR_HANDLE handle =
-		m_heap->GetCPUDescriptorHandleForHeapStart();
+	CD3DX12_CPU_DESCRIPTOR_HANDLE handle(m_heap->GetCPUDescriptorHandleForHeapStart());
 
 	// Note: ComPtr's are CPU objects but this resource needs to stay in scope until
 	// the command list that references it has finished executing on the GPU.
@@ -553,46 +553,39 @@ void D3DAppImpl::LoadAssets()
 		m_device->CreateShaderResourceView(m_texture.Get(), &srvDesc, handle);
 	}
 
-	handle.ptr += m_heapDescriptorSize;
+	handle.Offset(1, m_heapDescriptorSize);
 
-	// Create the constant buffer
+	// Create the constant buffer for all cubes
 	{
 		const UINT constantBufferSize = sizeof(SceneConstantBuffer);
+		const UINT totalConstantBufferSize = constantBufferSize * CubeCount;
 
 		ThrowIfFailed(m_device->CreateCommittedResource(
 			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
 			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(constantBufferSize),
+			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
 			D3D12_RESOURCE_STATE_GENERIC_READ,
 			nullptr,
 			IID_PPV_ARGS(&m_constantBuffer)
 		));
 
-		// Describe and create a constant buffer view.
-		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-		cbvDesc.BufferLocation = m_constantBuffer->GetGPUVirtualAddress();
-		cbvDesc.SizeInBytes = constantBufferSize;
-		m_device->CreateConstantBufferView(&cbvDesc, handle);
-
 		// Map and initialize the constant buffer. We don't unmap this until the
 		// app closes. Keeping things mapped for the lifetime of the resource is okay.
 		CD3DX12_RANGE readRange(0, 0);
 		ThrowIfFailed(m_constantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pCbvDataBegin)));
+
+		for (UINT i = 0; i < CubeCount; ++i)
+		{
+			// Describe and create a constant buffer view.
+			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+			cbvDesc.BufferLocation = m_constantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
+			cbvDesc.SizeInBytes = constantBufferSize;
+
+			m_device->CreateConstantBufferView(&cbvDesc, handle);
+			handle.Offset(1, m_heapDescriptorSize);
+		}
+
 		memcpy(m_pCbvDataBegin, &m_constantBufferData, sizeof(m_constantBufferData));
-	}
-
-	// Create a bundle that records vertex/descriptor setup and the draw call.
-	{
-		ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE, m_bundleAllocators[m_frameIndex].Get(), m_pipelineState.Get(), IID_PPV_ARGS(&m_bundle)));
-
-		// Record bundle commands. Bundles must NOT perform render target transitions/clears.
-		m_bundle->SetGraphicsRootSignature(m_rootSignature.Get());
-		m_bundle->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		m_bundle->IASetVertexBuffers(0, 1, &m_vertexBufferView);
-		m_bundle->IASetIndexBuffer(&m_indexBufferView);
-		m_bundle->DrawIndexedInstanced(36, 1, 0, 0, 0);
-
-		ThrowIfFailed(m_bundle->Close());
 	}
 
 	// Close the command list and execute it to begin the initial GPU setup.
@@ -621,21 +614,43 @@ void D3DAppImpl::LoadAssets()
 
 void D3DAppImpl::OnUpdate(const Timer& timer)
 {
-	// Rotate the cube over time
-	float angle = timer.TotalTime();
+	UNREFERENCED_PARAMETER(timer);
 
-	XMMATRIX world = XMMatrixRotationY(angle);
+	static const XMFLOAT3 cubePositions[CubeCount] =
+	{
+		{ 0.0f,  0.0f,  0.0f },
+		{ 2.0f,  5.0f, -15.0f },
+		{ -1.5f, -2.2f, -2.5f },
+		{ -3.8f, -2.0f, -12.3f },
+		{ 2.4f, -0.4f, -3.5f },
+		{ -1.7f,  3.0f, -7.5f },
+		{ 1.3f, -2.0f, -2.5f },
+		{ 1.5f,  2.0f, -2.5f },
+		{ 1.5f,  0.2f, -1.5f },
+		{ -1.3f,  1.0f, -1.5f }
+	};
+
 	XMMATRIX view = XMMatrixLookAtLH(
-		XMVectorSet(0.0f, 2.0f, -5.0f, 0.0f),  // Eye position
-		XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f),    // Look-at target
-		XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)     // Up direction
+		XMVectorSet(0.0f, 2.0f, -5.0f, 1.0f),
+		XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f),
+		XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)
 	);
+
 	XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV4, m_aspectRatio, 0.1f, 100.0f);
 
-	XMMATRIX mvp = world * view * proj;
-	// Transpose because HLSL expects column-major by default
-	XMStoreFloat4x4(&m_constantBufferData.mvp, XMMatrixTranspose(mvp));
-	memcpy(m_pCbvDataBegin, &m_constantBufferData, sizeof(m_constantBufferData));
+	for (UINT i = 0; i < CubeCount; ++i)
+	{
+		XMMATRIX world = XMMatrixTranslation(
+			cubePositions[i].x,
+			cubePositions[i].y,
+			cubePositions[i].z
+		);
+
+		XMMATRIX mvp = world * view * proj;
+		XMStoreFloat4x4(&m_constantBufferData[i].mvp, XMMatrixTranspose(mvp));
+	}
+
+	memcpy(m_pCbvDataBegin, m_constantBufferData, sizeof(m_constantBufferData));
 }
 
 void D3DAppImpl::OnRender(const Timer& timer)
@@ -681,10 +696,8 @@ void D3DAppImpl::PopulateCommandList()
 	auto gpuStart = m_heap->GetGPUDescriptorHandleForHeapStart();
 
 	CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(gpuStart, 0, m_heapDescriptorSize);
-	CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 1, m_heapDescriptorSize);
 
 	m_commandList->SetGraphicsRootDescriptorTable(0, srvHandle);
-	m_commandList->SetGraphicsRootDescriptorTable(1, cbvHandle);
 
 	m_commandList->RSSetViewports(1, &m_viewport);
 	m_commandList->RSSetScissorRects(1, &m_scissorRect);
@@ -705,8 +718,16 @@ void D3DAppImpl::PopulateCommandList()
 	// Clear depth stencil view
 	m_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-	// Execute the pre-recorded bundle which contains IA setup and the draw call.
-	m_commandList->ExecuteBundle(m_bundle.Get());
+	m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
+	m_commandList->IASetIndexBuffer(&m_indexBufferView);
+
+	for (UINT i = 0; i < CubeCount; ++i)
+	{
+		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 1 + i, m_heapDescriptorSize);
+		m_commandList->SetGraphicsRootDescriptorTable(1, cbvHandle);
+		m_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+	}
 
 	// Indicate that the back buffer will now be used to present.
 	m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[m_frameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
