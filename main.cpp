@@ -17,6 +17,9 @@ public:
 	virtual void OnRender(const Timer& timer) override;
 	virtual void OnDestroy() override;
 
+	virtual void OnKeyDown(UINT8 /*key*/) override;
+	virtual void OnKeyUp(UINT8 /*key*/) override;
+
 private:
 	static const UINT FrameCount = 2;
 	static const UINT CubeCount = 10;
@@ -71,6 +74,18 @@ private:
 	ComPtr<ID3D12Fence> m_fence;
 	UINT64 m_fenceValues[FrameCount];
 
+	// Camera properties
+	const double m_cameraSpeed;
+
+	XMVECTOR m_cameraPos;
+	XMVECTOR m_cameraFront;
+	XMVECTOR m_cameraUp;
+
+	bool m_moveForward = false;
+	bool m_moveBackward = false;
+	bool m_moveLeft = false;
+	bool m_moveRight = false;
+
 	void LoadPipeline();
 	void LoadAssets();
 	void PopulateCommandList();
@@ -108,7 +123,11 @@ D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	m_scissorRect(0, 0, static_cast<LONG>(width), static_cast<LONG>(height)),
 	m_fenceValues{},
 	m_rtvDescriptorSize(0),
-	m_constantBufferData{}
+	m_constantBufferData{},
+	m_cameraSpeed(5.0f),
+	m_cameraPos(XMVectorSet(0.0f, 0.0f, 3.0f, 1.0f)),
+	m_cameraFront(XMVectorSet(0.0f, 0.0f, -1.0f, 0.0f)),
+	m_cameraUp(XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f))
 {
 }
 
@@ -614,39 +633,73 @@ void D3DAppImpl::LoadAssets()
 
 void D3DAppImpl::OnUpdate(const Timer& timer)
 {
-	UNREFERENCED_PARAMETER(timer);
-
 	static const XMFLOAT3 cubePositions[CubeCount] =
 	{
 		{ 0.0f,  0.0f,  0.0f },
-		{ 2.0f,  5.0f, -15.0f },
-		{ -1.5f, -2.2f, -2.5f },
-		{ -3.8f, -2.0f, -12.3f },
-		{ 2.4f, -0.4f, -3.5f },
-		{ -1.7f,  3.0f, -7.5f },
-		{ 1.3f, -2.0f, -2.5f },
-		{ 1.5f,  2.0f, -2.5f },
-		{ 1.5f,  0.2f, -1.5f },
-		{ -1.3f,  1.0f, -1.5f }
+		{ 4.0f,  10.0f, -30.0f },
+		{ -3.0f, -4.4f, -5.0f },
+		{ -10.8f, -4.0f, -24.6f },
+		{ 4.8f, -0.16f, -7.0f },
+		{ -3.4f,  6.0f, -15.0f },
+		{ 2.6f, -4.0f, -5.0f },
+		{ 3.5f,  4.0f, -5.5f },
+		{ 4.5f,  0.5f, -3.5f },
+		{ -2.6f,  2.0f, -3.0f }
 	};
 
+	const float deltaTime = timer.DeltaTime();
+	if (deltaTime > 0.0f)
+	{
+		const XMVECTOR forward = XMVector3Normalize(m_cameraFront);
+		const XMVECTOR right = XMVector3Normalize(XMVector3Cross(forward, m_cameraUp));
+
+		XMVECTOR moveDirection = XMVectorZero();
+
+		if (m_moveForward)
+		{
+			moveDirection += forward;
+		}
+		if (m_moveBackward)
+		{
+			moveDirection -= forward;
+		}
+		if (m_moveLeft)
+		{
+			moveDirection += right;
+		}
+		if (m_moveRight)
+		{
+			moveDirection -= right;
+		}
+
+		if (XMVectorGetX(XMVector3LengthSq(moveDirection)) > 0.0f)
+		{
+			moveDirection = XMVector3Normalize(moveDirection);
+			m_cameraPos += moveDirection * static_cast<float>(m_cameraSpeed) * deltaTime;
+		}
+	}
+
 	XMMATRIX view = XMMatrixLookAtLH(
-		XMVectorSet(0.0f, 2.0f, -5.0f, 1.0f),
-		XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f),
-		XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)
+		m_cameraPos,
+		m_cameraPos + m_cameraFront,
+		m_cameraUp
 	);
 
 	XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV4, m_aspectRatio, 0.1f, 100.0f);
 
 	for (UINT i = 0; i < CubeCount; ++i)
 	{
-		XMMATRIX world = XMMatrixTranslation(
+		XMMATRIX mRotate = XMMatrixRotationAxis({ 1.0f, 0.3f, 0.5f }, XMConvertToRadians(20.0f * i));
+
+		XMMATRIX mTranslate = XMMatrixTranslation(
 			cubePositions[i].x,
 			cubePositions[i].y,
 			cubePositions[i].z
 		);
 
+		XMMATRIX world = mRotate * mTranslate;
 		XMMATRIX mvp = world * view * proj;
+
 		XMStoreFloat4x4(&m_constantBufferData[i].mvp, XMMatrixTranspose(mvp));
 	}
 
@@ -673,6 +726,48 @@ void D3DAppImpl::OnDestroy()
 	// Ensure that the GPU is no longer referencing resources that are about to be cleaned up by the desctuctor
 	WaitForGpu();
 	CloseHandle(m_fenceEvent);
+}
+
+void D3DAppImpl::OnKeyDown(UINT8 key)
+{
+	switch (key)
+	{
+	case 'W':
+		m_moveForward = true;
+		break;
+	case 'S':
+		m_moveBackward = true;
+		break;
+	case 'A':
+		m_moveLeft = true;
+		break;
+	case 'D':
+		m_moveRight = true;
+		break;
+	default:
+		break;
+	}
+}
+
+void D3DAppImpl::OnKeyUp(UINT8 key)
+{
+	switch (key)
+	{
+	case 'W':
+		m_moveForward = false;
+		break;
+	case 'S':
+		m_moveBackward = false;
+		break;
+	case 'A':
+		m_moveLeft = false;
+		break;
+	case 'D':
+		m_moveRight = false;
+		break;
+	default:
+		break;
+	}
 }
 
 void D3DAppImpl::PopulateCommandList()
