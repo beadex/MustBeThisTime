@@ -20,6 +20,8 @@ public:
 	virtual void OnKeyDown(UINT8 /*key*/) override;
 	virtual void OnKeyUp(UINT8 /*key*/) override;
 
+	virtual void OnMouseRawDelta(int dx, int dy) override;
+
 private:
 	static const UINT FrameCount = 2;
 	static const UINT CubeCount = 10;
@@ -81,10 +83,16 @@ private:
 	XMVECTOR m_cameraFront;
 	XMVECTOR m_cameraUp;
 
+	// Keyboard input state
 	bool m_moveForward = false;
 	bool m_moveBackward = false;
 	bool m_moveLeft = false;
 	bool m_moveRight = false;
+
+	// Mouse input state
+	float m_yaw;
+	float m_pitch;
+	float m_mouseSensitivity;
 
 	void LoadPipeline();
 	void LoadAssets();
@@ -127,7 +135,10 @@ D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	m_cameraSpeed(5.0f),
 	m_cameraPos(XMVectorSet(0.0f, 0.0f, 3.0f, 1.0f)),
 	m_cameraFront(XMVectorSet(0.0f, 0.0f, -1.0f, 0.0f)),
-	m_cameraUp(XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f))
+	m_cameraUp(XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)),
+	m_yaw(-90.0f),
+	m_pitch(0.0f),
+	m_mouseSensitivity(0.1f)
 {
 }
 
@@ -650,18 +661,18 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 	const float deltaTime = timer.DeltaTime();
 	if (deltaTime > 0.0f)
 	{
-		const XMVECTOR forward = XMVector3Normalize(m_cameraFront);
-		const XMVECTOR right = XMVector3Normalize(XMVector3Cross(forward, m_cameraUp));
+		const XMVECTOR flatForward = XMVector3Normalize(XMVectorSet(XMVectorGetX(m_cameraFront), 0.0f, XMVectorGetZ(m_cameraFront), 0.0f));
+		const XMVECTOR right = XMVector3Normalize(XMVector3Cross(flatForward, m_cameraUp));
 
 		XMVECTOR moveDirection = XMVectorZero();
 
 		if (m_moveForward)
 		{
-			moveDirection += forward;
+			moveDirection += flatForward;
 		}
 		if (m_moveBackward)
 		{
-			moveDirection -= forward;
+			moveDirection -= flatForward;
 		}
 		if (m_moveLeft)
 		{
@@ -732,6 +743,9 @@ void D3DAppImpl::OnKeyDown(UINT8 key)
 {
 	switch (key)
 	{
+	case VK_ESCAPE:
+		DestroyWindow(Win32Application::GetHwnd());
+		break;
 	case 'W':
 		m_moveForward = true;
 		break;
@@ -768,6 +782,30 @@ void D3DAppImpl::OnKeyUp(UINT8 key)
 	default:
 		break;
 	}
+}
+
+void D3DAppImpl::OnMouseRawDelta(int dx, int dy)
+{
+	m_yaw -= static_cast<float>(dx) * m_mouseSensitivity;
+	m_pitch -= static_cast<float>(dy) * m_mouseSensitivity;
+
+	if (m_pitch > 89.0f)
+	{
+		m_pitch = 89.0f;
+	}
+	else if (m_pitch < -89.0f)
+	{
+		m_pitch = -89.0f;
+	}
+
+	const float yawRadians = XMConvertToRadians(m_yaw);
+	const float pitchRadians = XMConvertToRadians(m_pitch);
+
+	const float xDir = cosf(pitchRadians) * cosf(yawRadians);
+	const float yDir = sinf(pitchRadians);
+	const float zDir = cosf(pitchRadians) * sinf(yawRadians);
+
+	m_cameraFront = XMVector3Normalize(XMVectorSet(xDir, yDir, zDir, 0.0f));
 }
 
 void D3DAppImpl::PopulateCommandList()

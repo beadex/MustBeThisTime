@@ -1,5 +1,31 @@
 #include "stdafx.h"
 #include "win32App.h"
+#include <hidusage.h>
+
+namespace
+{
+	void LockCursorToClient(HWND hwnd)
+	{
+		RECT clientRect = {};
+		GetClientRect(hwnd, &clientRect);
+
+		POINT topLeft = { clientRect.left, clientRect.top };
+		POINT bottomRight = { clientRect.right, clientRect.bottom };
+
+		ClientToScreen(hwnd, &topLeft);
+		ClientToScreen(hwnd, &bottomRight);
+
+		RECT clipRect = { topLeft.x, topLeft.y, bottomRight.x, bottomRight.y };
+		ClipCursor(&clipRect);
+		ShowCursor(FALSE);
+	}
+
+	void UnlockCursor()
+	{
+		ClipCursor(nullptr);
+		ShowCursor(TRUE);
+	}
+}
 
 HWND Win32Application::m_hwnd = nullptr;
 Timer Win32Application::m_timer = Timer();
@@ -39,10 +65,20 @@ int Win32Application::Run(D3DApp* pApp, HINSTANCE hInstance, int nCmdShow) {
 		hInstance,
 		pApp);
 
+	RAWINPUTDEVICE rid = {};
+	rid.usUsagePage = HID_USAGE_PAGE_GENERIC;
+	rid.usUsage = HID_USAGE_GENERIC_MOUSE;
+	rid.dwFlags = 0;
+	rid.hwndTarget = m_hwnd;
+	ThrowIfFailed(RegisterRawInputDevices(&rid, 1, sizeof(rid)) ? S_OK : HRESULT_FROM_WIN32(GetLastError()));
+
 	// Initialize the D3D App. OnInit is defined in each child-implementation of D3DApp.
 	pApp->OnInit();
 
 	ShowWindow(m_hwnd, nCmdShow);
+	SetForegroundWindow(m_hwnd);
+	SetFocus(m_hwnd);
+	LockCursorToClient(m_hwnd);
 
 	// Main loop.
 	MSG msg = {};
@@ -72,6 +108,7 @@ int Win32Application::Run(D3DApp* pApp, HINSTANCE hInstance, int nCmdShow) {
 		}
 	}
 
+	UnlockCursor();
 	pApp->OnDestroy();
 
 	// Return this part of the WM_QUIT message to Windows.
@@ -85,9 +122,9 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 
 	switch (message)
 	{
-	// WM_ACTIVATE is sent when the window is activated or deactivated.  
-	// We pause the game when the window is deactivated and unpause it 
-	// when it becomes active.  
+		// WM_ACTIVATE is sent when the window is activated or deactivated.  
+		// We pause the game when the window is deactivated and unpause it 
+		// when it becomes active.  
 	case WM_ACTIVATE:
 		if (LOWORD(wParam) == WA_INACTIVE)
 		{
@@ -123,14 +160,40 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 		}
 		return 0;
 
-	// WM_EXITSIZEMOVE is sent when the user grabs the resize bars.
+	case WM_MOUSEMOVE:
+		return 0;
+
+	case WM_INPUT:
+		if (pApp)
+		{
+			UINT size = 0;
+			if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER)) == 0 && size > 0)
+			{
+				std::vector<BYTE> buffer(size);
+				if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, buffer.data(), &size, sizeof(RAWINPUTHEADER)) == size)
+				{
+					const RAWINPUT* raw = reinterpret_cast<const RAWINPUT*>(buffer.data());
+					if (raw->header.dwType == RIM_TYPEMOUSE)
+					{
+						pApp->OnMouseRawDelta(raw->data.mouse.lLastX, raw->data.mouse.lLastY);
+					}
+				}
+			}
+		}
+		return 0;
+
+	case WM_SETCURSOR:
+		SetCursor(nullptr);
+		return TRUE;
+
+		// WM_EXITSIZEMOVE is sent when the user grabs the resize bars.
 	case WM_ENTERSIZEMOVE:
 		m_appPaused = true;
 		m_timer.Stop();
 		return 0;
 
-	// WM_EXITSIZEMOVE is sent when the user releases the resize bars.
-	// Here we reset everything based on the new window dimensions.
+		// WM_EXITSIZEMOVE is sent when the user releases the resize bars.
+		// Here we reset everything based on the new window dimensions.
 	case WM_EXITSIZEMOVE:
 		m_appPaused = false;
 		m_timer.Start();

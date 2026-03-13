@@ -15,9 +15,12 @@ public:
     virtual void OnRender(const Timer& timer) = 0;
     virtual void OnDestroy() = 0;
 
-    // Samples override the event handlers to handle specific messages.
+	// Keyboard input handlers.
     virtual void OnKeyDown(UINT8 /*key*/) {}
     virtual void OnKeyUp(UINT8 /*key*/) {}
+
+	// Mouse iput handlers.
+    virtual void OnMouseRawDelta(int /*dx*/, int /*dy*/) {}
 
     // Accessors.
     UINT GetWidth() const { return m_width; }
