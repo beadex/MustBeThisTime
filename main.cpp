@@ -661,18 +661,17 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 	const float deltaTime = timer.DeltaTime();
 	if (deltaTime > 0.0f)
 	{
-		const XMVECTOR flatForward = XMVector3Normalize(XMVectorSet(XMVectorGetX(m_cameraFront), 0.0f, XMVectorGetZ(m_cameraFront), 0.0f));
-		const XMVECTOR right = XMVector3Normalize(XMVector3Cross(flatForward, m_cameraUp));
+		const XMVECTOR right = XMVector3Normalize(XMVector3Cross(m_cameraFront, m_cameraUp));
 
 		XMVECTOR moveDirection = XMVectorZero();
 
 		if (m_moveForward)
 		{
-			moveDirection += flatForward;
+			moveDirection += m_cameraFront;
 		}
 		if (m_moveBackward)
 		{
-			moveDirection -= flatForward;
+			moveDirection -= m_cameraFront;
 		}
 		if (m_moveLeft)
 		{
@@ -700,7 +699,7 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 
 	for (UINT i = 0; i < CubeCount; ++i)
 	{
-		XMMATRIX mRotate = XMMatrixRotationAxis({ 1.0f, 0.3f, 0.5f }, XMConvertToRadians(20.0f * i));
+		XMMATRIX mRotate = XMMatrixRotationAxis(XMVectorSet(1.0f, 0.3f, 0.5f, 1.0f), XMConvertToRadians(20.0f * i));
 
 		XMMATRIX mTranslate = XMMatrixTranslation(
 			cubePositions[i].x,
