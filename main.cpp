@@ -25,10 +25,12 @@ public:
 private:
 	static const UINT FrameCount = 2;
 	static const UINT CubeCount = 10;
+	static const UINT LightSourceCount = 1;
 
 	struct Vertex
 	{
 		XMFLOAT3 position;
+        XMFLOAT3 normal;
 		XMFLOAT2 uv;
 	};
 
@@ -38,6 +40,20 @@ private:
 		float padding[48]; // Padding so the constant buffer is 256-byte aligned (64 + 192 = 256)
 	};
 	static_assert((sizeof(SceneConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
+
+	struct LightDataConstantBuffer
+	{
+		XMFLOAT3 lightPosition;
+		float padding[61]; // 64 bytes total, 16-byte aligned
+	};
+	static_assert((sizeof(LightDataConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
+
+	struct LightSourceConstantBuffer
+	{
+		XMFLOAT4X4 mvp;
+		float padding[48];
+	};
+	static_assert((sizeof(LightSourceConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
 
 	// Pipeline objects.
 	CD3DX12_VIEWPORT m_viewport;
@@ -52,7 +68,8 @@ private:
 	ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
 	ComPtr<ID3D12DescriptorHeap> m_heap;
 	ComPtr<ID3D12DescriptorHeap> m_dsvHeap;
-	ComPtr<ID3D12PipelineState> m_pipelineState;
+	ComPtr<ID3D12PipelineState> m_cubePipelineState;
+	ComPtr<ID3D12PipelineState> m_lightSourcePipelineState;
 	ComPtr<ID3D12GraphicsCommandList> m_commandList;
 	ComPtr<ID3D12GraphicsCommandList> m_bundle;
 	UINT m_rtvDescriptorSize;
@@ -64,11 +81,18 @@ private:
 	D3D12_VERTEX_BUFFER_VIEW m_vertexBufferView;
 	ComPtr<ID3D12Resource> m_indexBuffer;
 	D3D12_INDEX_BUFFER_VIEW m_indexBufferView;
-	ComPtr<ID3D12Resource> m_texture;
-	ComPtr<ID3D12Resource> m_constantBuffer;
-	SceneConstantBuffer m_constantBufferData[CubeCount];
+	ComPtr<ID3D12Resource> m_texture;          // diffuse
+	ComPtr<ID3D12Resource> m_specularTexture;  // specular
+	ComPtr<ID3D12Resource> m_cubeConstantBuffer;
+	SceneConstantBuffer m_cubeConstantBufferData[CubeCount];
+ ComPtr<ID3D12Resource> m_lightDataConstantBuffer; // for cube shader b1
+	LightDataConstantBuffer m_lightDataConstantBufferData;
+	ComPtr<ID3D12Resource> m_lightSourceConstantBuffer;
+	LightSourceConstantBuffer m_lightSourceConstantBufferData[LightSourceCount];
 	ComPtr<ID3D12Resource> m_depthBuffer;
-	UINT8* m_pCbvDataBegin;
+ UINT8* m_pCubeCbvDataBegin;
+	UINT8* m_pLightDataCbvDataBegin;
+	UINT8* m_pLightCbvDataBegin;
 
 	// Synchronization objects.
 	UINT m_frameIndex;
@@ -126,12 +150,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	D3DApp(width, height, name),
 	m_frameIndex(0),
-	m_pCbvDataBegin(nullptr),
+	m_pCubeCbvDataBegin(nullptr),
+      m_pLightDataCbvDataBegin(nullptr),
+		m_pLightCbvDataBegin(nullptr),
 	m_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)),
 	m_scissorRect(0, 0, static_cast<LONG>(width), static_cast<LONG>(height)),
 	m_fenceValues{},
 	m_rtvDescriptorSize(0),
-	m_constantBufferData{},
+	m_cubeConstantBufferData{},
+	m_lightSourceConstantBufferData{},
 	m_cameraSpeed(5.0f),
 	m_cameraPos(XMVectorSet(0.0f, 0.0f, 3.0f, 1.0f)),
 	m_cameraFront(XMVectorSet(0.0f, 0.0f, -1.0f, 0.0f)),
@@ -239,7 +266,7 @@ void D3DAppImpl::LoadPipeline()
 
 		// Need only one heap for both SRV and CBV
 		D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-		heapDesc.NumDescriptors = 1 + CubeCount;
+		heapDesc.NumDescriptors = 2 + CubeCount + LightSourceCount + 1;
 		heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 		ThrowIfFailed(m_device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_heap)));
@@ -311,13 +338,15 @@ void D3DAppImpl::LoadAssets()
 			featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
 		}
 
-		CD3DX12_DESCRIPTOR_RANGE1 ranges[2];
-		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
-		ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
+        CD3DX12_DESCRIPTOR_RANGE1 ranges[3];
+		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
+		ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC); // per-object (b0)
+		ranges[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 1, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC); // light data (b1)
 
-		CD3DX12_ROOT_PARAMETER1 rootParameters[2];
+		CD3DX12_ROOT_PARAMETER1 rootParameters[3];
 		rootParameters[0].InitAsDescriptorTable(1, &ranges[0], D3D12_SHADER_VISIBILITY_PIXEL);
 		rootParameters[1].InitAsDescriptorTable(1, &ranges[1], D3D12_SHADER_VISIBILITY_VERTEX);
+		rootParameters[2].InitAsDescriptorTable(1, &ranges[2], D3D12_SHADER_VISIBILITY_PIXEL);
 
 		D3D12_STATIC_SAMPLER_DESC sampler = {};
 		sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
@@ -349,21 +378,22 @@ void D3DAppImpl::LoadAssets()
 		ThrowIfFailed(m_device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature)));
 	}
 
-	// Create the pipeline state, which includes compiling and loading shaders.
+	// Create the cube pipeline state, which includes compiling and loading shaders.
 	{
 		UINT8* pVertexShaderData = nullptr;
 		UINT8* pPixelShaderData = nullptr;
 		UINT vertexShaderDataLength = 0;
 		UINT pixelShaderDataLength = 0;
 
-		ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(L"shaders_VSMain.cso").c_str(), &pVertexShaderData, &vertexShaderDataLength));
-		ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(L"shaders_PSMain.cso").c_str(), &pPixelShaderData, &pixelShaderDataLength));
+		ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(L"cubeShaders_VSMain.cso").c_str(), &pVertexShaderData, &vertexShaderDataLength));
+		ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(L"cubeShaders_PSMain.cso").c_str(), &pPixelShaderData, &pixelShaderDataLength));
 
-		// Define the vertex input layout
+       // Define the vertex input layout (position, normal, uv)
 		D3D12_INPUT_ELEMENT_DESC inputElementDescs[] =
 		{
-			{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+			{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+			{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
 		};
 
 		// Describe and create the graphics pipeline state object (PSO).
@@ -388,50 +418,91 @@ void D3DAppImpl::LoadAssets()
 		psoDesc.NumRenderTargets = 1;
 		psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 		psoDesc.SampleDesc.Count = 1;
-		ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_pipelineState)));
+		ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_cubePipelineState)));
+	}
+
+	// Create the light source pipeline state, which includes compiling and loading shaders.
+	{
+		UINT8* pVertexShaderData = nullptr;
+		UINT8* pPixelShaderData = nullptr;
+		UINT vertexShaderDataLength = 0;
+		UINT pixelShaderDataLength = 0;
+
+		ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(L"lightSourceShaders_VSMain.cso").c_str(), &pVertexShaderData, &vertexShaderDataLength));
+		ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(L"lightSourceShaders_PSMain.cso").c_str(), &pPixelShaderData, &pixelShaderDataLength));
+
+       // Define the vertex input layout for light source cubes (position only)
+		D3D12_INPUT_ELEMENT_DESC inputElementDescs[] =
+		{
+			{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+		};
+
+		// Describe and create the graphics pipeline state object (PSO).
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+		psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
+		psoDesc.pRootSignature = m_rootSignature.Get();
+		psoDesc.VS = CD3DX12_SHADER_BYTECODE(pVertexShaderData, vertexShaderDataLength);
+		psoDesc.PS = CD3DX12_SHADER_BYTECODE(pPixelShaderData, pixelShaderDataLength);
+		psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+		psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+
+		// Enable depth testing
+		psoDesc.DepthStencilState.DepthEnable = TRUE;  // ← Change this
+		psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+		psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		psoDesc.DepthStencilState.StencilEnable = FALSE;
+
+		psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;  // ← Add this
+
+		psoDesc.SampleMask = UINT_MAX;
+		psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		psoDesc.NumRenderTargets = 1;
+		psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+		psoDesc.SampleDesc.Count = 1;
+		ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_lightSourcePipelineState)));
 	}
 
 	// Create the command list.
-	ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocators[m_frameIndex].Get(), m_pipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
+	ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocators[m_frameIndex].Get(), m_cubePipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
 
-	// Create the vertex buffer.
+    // Create the vertex buffer.
 	{
 		Vertex vertices[] = {
-			// Front face (z = -1)
-			{ {-1.0f, -1.0f, -1.0f}, {0.0f, 1.0f} },
-			{ {-1.0f,  1.0f, -1.0f}, {0.0f, 0.0f} },
-			{ { 1.0f,  1.0f, -1.0f}, {1.0f, 0.0f} },
-			{ { 1.0f, -1.0f, -1.0f}, {1.0f, 1.0f} },
+      // Front face (z = -1), normal (0, 0, -1)
+		{ {-1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f} },
+		{ {-1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f} },
+		{ { 1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 0.0f} },
+		{ { 1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f} },
 
-			// Back face (z = 1)
-			{ { 1.0f, -1.0f,  1.0f}, {0.0f, 1.0f} },
-			{ { 1.0f,  1.0f,  1.0f}, {0.0f, 0.0f} },
-			{ {-1.0f,  1.0f,  1.0f}, {1.0f, 0.0f} },
-			{ {-1.0f, -1.0f,  1.0f}, {1.0f, 1.0f} },
+		// Back face (z = 1), normal (0, 0, 1)
+		{ { 1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f} },
+		{ { 1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} },
+		{ {-1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f} },
+		{ {-1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f} },
 
-			// Left face (x = -1)
-			{ {-1.0f, -1.0f,  1.0f}, {0.0f, 1.0f} },
-			{ {-1.0f,  1.0f,  1.0f}, {0.0f, 0.0f} },
-			{ {-1.0f,  1.0f, -1.0f}, {1.0f, 0.0f} },
-			{ {-1.0f, -1.0f, -1.0f}, {1.0f, 1.0f} },
+		// Left face (x = -1), normal (-1, 0, 0)
+		{ {-1.0f, -1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
+		{ {-1.0f,  1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
+		{ {-1.0f,  1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
+		{ {-1.0f, -1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
 
-			// Right face (x = 1)
-			{ { 1.0f, -1.0f, -1.0f}, {0.0f, 1.0f} },
-			{ { 1.0f,  1.0f, -1.0f}, {0.0f, 0.0f} },
-			{ { 1.0f,  1.0f,  1.0f}, {1.0f, 0.0f} },
-			{ { 1.0f, -1.0f,  1.0f}, {1.0f, 1.0f} },
+		// Right face (x = 1), normal (1, 0, 0)
+		{ { 1.0f, -1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
+		{ { 1.0f,  1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
+		{ { 1.0f,  1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
+		{ { 1.0f, -1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
 
-			// Top face (y = 1)
-			{ {-1.0f,  1.0f, -1.0f}, {0.0f, 1.0f} },
-			{ {-1.0f,  1.0f,  1.0f}, {0.0f, 0.0f} },
-			{ { 1.0f,  1.0f,  1.0f}, {1.0f, 0.0f} },
-			{ { 1.0f,  1.0f, -1.0f}, {1.0f, 1.0f} },
+		// Top face (y = 1), normal (0, 1, 0)
+		{ {-1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 1.0f} },
+		{ {-1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f} },
+		{ { 1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 0.0f} },
+		{ { 1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f} },
 
-			// Bottom face (y = -1)
-			{ {-1.0f, -1.0f,  1.0f}, {0.0f, 1.0f} },
-			{ {-1.0f, -1.0f, -1.0f}, {0.0f, 0.0f} },
-			{ { 1.0f, -1.0f, -1.0f}, {1.0f, 0.0f} },
-			{ { 1.0f, -1.0f,  1.0f}, {1.0f, 1.0f} },
+		// Bottom face (y = -1), normal (0, -1, 0)
+		{ {-1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 1.0f} },
+		{ {-1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f} },
+		{ { 1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 0.0f} },
+		{ { 1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f} },
 		};
 
 		UINT16 indices[] =
@@ -508,84 +579,95 @@ void D3DAppImpl::LoadAssets()
 	// the command list that references it has finished executing on the GPU.
 	// We will flush the GPU at the end of this method to ensure the resource is not
 	// prematurely destroyed.
-	ComPtr<ID3D12Resource> textureUploadHeap;
+	ComPtr<ID3D12Resource> textureUploadHeapDiffuse;
+	ComPtr<ID3D12Resource> textureUploadHeapSpecular;
 
-	// Create the texture from an image file
-	{
-		const std::wstring texturePath = GetAssetFullPath(L"Textures\\wall.jpg");
-
-		TexMetadata metadata = {};
-		ScratchImage scratchImage;
-
-		ThrowIfFailed(LoadFromWICFile(
-			texturePath.c_str(),
-			WIC_FLAGS_FORCE_RGB,
-			&metadata,
-			scratchImage
-		));
-
-		// Describe and create a Texture2D
-		D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
-			metadata.format,
-			static_cast<UINT64>(metadata.width),
-			static_cast<UINT>(metadata.height),
-			static_cast<UINT16>(metadata.arraySize),
-			static_cast<UINT16>(metadata.mipLevels)
-		);
-
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-			D3D12_HEAP_FLAG_NONE,
-			&textureDesc,
-			D3D12_RESOURCE_STATE_COPY_DEST,
-			nullptr,
-			IID_PPV_ARGS(&m_texture)
-		));
-
-		const UINT subresourceCount = static_cast<UINT>(scratchImage.GetImageCount());
-		const UINT64 uploadBufferSize = GetRequiredIntermediateSize(m_texture.Get(), 0, subresourceCount);
-
-		// Create the GPU upload buffer
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&textureUploadHeap)
-		));
-
-		std::vector<D3D12_SUBRESOURCE_DATA> subresources;
-		subresources.reserve(subresourceCount);
-
-		const Image* images = scratchImage.GetImages();
-
-		for (UINT i = 0; i < subresourceCount; ++i)
+	auto LoadTextureAndCreateSrv = [&](const std::wstring& path,
+		ComPtr<ID3D12Resource>& texture,
+		ComPtr<ID3D12Resource>& uploadHeap,
+		CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandleOut)
 		{
-			D3D12_SUBRESOURCE_DATA subresource = {};
-			subresource.pData = images[i].pixels;
-			subresource.RowPitch = static_cast<LONG_PTR>(images[i].rowPitch);
-			subresource.SlicePitch = static_cast<LONG_PTR>(images[i].slicePitch);
-			subresources.push_back(subresource);
-		}
+			TexMetadata metadata = {};
+			ScratchImage scratchImage;
 
-		UpdateSubresources(m_commandList.Get(), m_texture.Get(), textureUploadHeap.Get(), 0, 0, subresourceCount, subresources.data());
-		m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+			ThrowIfFailed(LoadFromWICFile(
+				path.c_str(),
+				WIC_FLAGS_FORCE_RGB,
+				&metadata,
+				scratchImage
+			));
 
-		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-		srvDesc.Format = metadata.format;
-		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-		srvDesc.Texture2D.MostDetailedMip = 0;
-		srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
-		srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+			// Describe and create a Texture2D
+			D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+				metadata.format,
+				static_cast<UINT64>(metadata.width),
+				static_cast<UINT>(metadata.height),
+				static_cast<UINT16>(metadata.arraySize),
+				static_cast<UINT16>(metadata.mipLevels)
+			);
 
-		m_device->CreateShaderResourceView(m_texture.Get(), &srvDesc, handle);
-	}
+			ThrowIfFailed(m_device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+				D3D12_HEAP_FLAG_NONE,
+				&textureDesc,
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				nullptr,
+				IID_PPV_ARGS(&texture)
+			));
 
-	handle.Offset(1, m_heapDescriptorSize);
+			const UINT subresourceCount = static_cast<UINT>(scratchImage.GetImageCount());
+			const UINT64 uploadBufferSize = GetRequiredIntermediateSize(texture.Get(), 0, subresourceCount);
 
-	// Create the constant buffer for all cubes
+			// Create the GPU upload buffer
+			ThrowIfFailed(m_device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize),
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&uploadHeap)
+			));
+
+			std::vector<D3D12_SUBRESOURCE_DATA> subresources;
+			subresources.reserve(subresourceCount);
+
+			const Image* images = scratchImage.GetImages();
+
+			for (UINT i = 0; i < subresourceCount; ++i)
+			{
+				D3D12_SUBRESOURCE_DATA subresource = {};
+				subresource.pData = images[i].pixels;
+				subresource.RowPitch = static_cast<LONG_PTR>(images[i].rowPitch);
+				subresource.SlicePitch = static_cast<LONG_PTR>(images[i].slicePitch);
+				subresources.push_back(subresource);
+			}
+
+			UpdateSubresources(m_commandList.Get(), texture.Get(), uploadHeap.Get(), 0, 0, subresourceCount, subresources.data());
+			m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDesc.Format = metadata.format;
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Texture2D.MostDetailedMip = 0;
+			srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
+			srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+
+			m_device->CreateShaderResourceView(texture.Get(), &srvDesc, srvHandleOut);
+			handle.Offset(1, m_heapDescriptorSize);
+		};
+
+	// 0: diffuse, 1: specular
+	const std::wstring diffusePath = GetAssetFullPath(L"Textures\\container.png");
+	const std::wstring specularPath = GetAssetFullPath(L"Textures\\container_specular.png");
+
+	// SRV for diffuse at heap slot 0
+	LoadTextureAndCreateSrv(diffusePath, m_texture, textureUploadHeapDiffuse, handle);
+
+	// SRV for specular at heap slot 1
+	LoadTextureAndCreateSrv(specularPath, m_specularTexture, textureUploadHeapSpecular, handle);
+
+ // Create the constant buffer for all cubes (b0)
 	{
 		const UINT constantBufferSize = sizeof(SceneConstantBuffer);
 		const UINT totalConstantBufferSize = constantBufferSize * CubeCount;
@@ -596,26 +678,86 @@ void D3DAppImpl::LoadAssets()
 			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
 			D3D12_RESOURCE_STATE_GENERIC_READ,
 			nullptr,
-			IID_PPV_ARGS(&m_constantBuffer)
+			IID_PPV_ARGS(&m_cubeConstantBuffer)
 		));
 
 		// Map and initialize the constant buffer. We don't unmap this until the
 		// app closes. Keeping things mapped for the lifetime of the resource is okay.
 		CD3DX12_RANGE readRange(0, 0);
-		ThrowIfFailed(m_constantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pCbvDataBegin)));
+		ThrowIfFailed(m_cubeConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pCubeCbvDataBegin)));
 
 		for (UINT i = 0; i < CubeCount; ++i)
 		{
 			// Describe and create a constant buffer view.
 			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-			cbvDesc.BufferLocation = m_constantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
+			cbvDesc.BufferLocation = m_cubeConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
 			cbvDesc.SizeInBytes = constantBufferSize;
 
 			m_device->CreateConstantBufferView(&cbvDesc, handle);
 			handle.Offset(1, m_heapDescriptorSize);
 		}
 
-		memcpy(m_pCbvDataBegin, &m_constantBufferData, sizeof(m_constantBufferData));
+		memcpy(m_pCubeCbvDataBegin, &m_cubeConstantBufferData, sizeof(m_cubeConstantBufferData));
+	}
+
+ // Create the constant buffer for light sources (b0 in light shaders)
+	{
+		const UINT constantBufferSize = sizeof(LightSourceConstantBuffer);
+		const UINT totalConstantBufferSize = constantBufferSize * LightSourceCount;
+
+		ThrowIfFailed(m_device->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_PPV_ARGS(&m_lightSourceConstantBuffer)
+		));
+
+		// Map and initialize the constant buffer. We don't unmap this until the
+		// app closes. Keeping things mapped for the lifetime of the resource is okay.
+		CD3DX12_RANGE readRange(0, 0);
+		ThrowIfFailed(m_lightSourceConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightCbvDataBegin)));
+
+		for (UINT i = 0; i < LightSourceCount; ++i)
+		{
+			// Describe and create a constant buffer view.
+			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+			cbvDesc.BufferLocation = m_lightSourceConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
+			cbvDesc.SizeInBytes = constantBufferSize;
+
+			m_device->CreateConstantBufferView(&cbvDesc, handle);
+			handle.Offset(1, m_heapDescriptorSize);
+		}
+
+        memcpy(m_pLightCbvDataBegin, &m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
+	}
+
+	// Create the constant buffer for light data used by cube shaders (b1)
+	{
+		const UINT constantBufferSize = sizeof(LightDataConstantBuffer);
+		const UINT totalConstantBufferSize = constantBufferSize;
+
+		ThrowIfFailed(m_device->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_PPV_ARGS(&m_lightDataConstantBuffer)
+		));
+
+		CD3DX12_RANGE readRange(0, 0);
+		ThrowIfFailed(m_lightDataConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightDataCbvDataBegin)));
+
+		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+		cbvDesc.BufferLocation = m_lightDataConstantBuffer->GetGPUVirtualAddress();
+		cbvDesc.SizeInBytes = constantBufferSize;
+		m_device->CreateConstantBufferView(&cbvDesc, handle);
+		// handle.Offset(1, m_heapDescriptorSize); // last descriptor, no need to offset further
+
+		ZeroMemory(&m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
+		memcpy(m_pLightDataCbvDataBegin, &m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
 	}
 
 	// Close the command list and execute it to begin the initial GPU setup.
@@ -656,6 +798,11 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 		{ 3.5f,  4.0f, -5.5f },
 		{ 4.5f,  0.5f, -3.5f },
 		{ -2.6f,  2.0f, -3.0f }
+	};
+
+	static const XMFLOAT3 lightSourcePositions[LightSourceCount] =
+	{
+		{ 0.0f,  0.0f,  -20.0f },
 	};
 
 	const float deltaTime = timer.DeltaTime();
@@ -710,10 +857,30 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 		XMMATRIX world = mRotate * mTranslate;
 		XMMATRIX mvp = world * view * proj;
 
-		XMStoreFloat4x4(&m_constantBufferData[i].mvp, XMMatrixTranspose(mvp));
+		XMStoreFloat4x4(&m_cubeConstantBufferData[i].mvp, XMMatrixTranspose(mvp));
 	}
 
-	memcpy(m_pCbvDataBegin, m_constantBufferData, sizeof(m_constantBufferData));
+	for (UINT i = 0; i < LightSourceCount; ++i)
+	{
+		XMMATRIX mTranslate = XMMatrixTranslation(
+			lightSourcePositions[i].x,
+			lightSourcePositions[i].y,
+			lightSourcePositions[i].z
+		);
+
+		XMMATRIX mScale = XMMatrixScaling(0.3f, 0.3f, 0.3f);
+
+		XMMATRIX world = mTranslate * mScale;
+		XMMATRIX mvp = world * view * proj;
+
+		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].mvp, XMMatrixTranspose(mvp));
+	}
+
+	memcpy(m_pCubeCbvDataBegin, m_cubeConstantBufferData, sizeof(m_cubeConstantBufferData));
+ // Use the first light source as directional light origin for cube shader
+	m_lightDataConstantBufferData.lightPosition = lightSourcePositions[0];
+	memcpy(m_pLightDataCbvDataBegin, &m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
+	memcpy(m_pLightCbvDataBegin, m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
 }
 
 void D3DAppImpl::OnRender(const Timer& timer)
@@ -817,7 +984,7 @@ void D3DAppImpl::PopulateCommandList()
 	// However, when ExecuteCommandList() is called on a particular command 
 	// list, that command list can then be reset at any time and must be before 
 	// re-recording.
-	ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), m_pipelineState.Get()));
+	ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), m_cubePipelineState.Get()));
 
 	// Set necessary state
 	m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
@@ -828,8 +995,10 @@ void D3DAppImpl::PopulateCommandList()
 	auto gpuStart = m_heap->GetGPUDescriptorHandleForHeapStart();
 
 	CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(gpuStart, 0, m_heapDescriptorSize);
-
 	m_commandList->SetGraphicsRootDescriptorTable(0, srvHandle);
+	// Light data CBV (b1) is after SRVs and all per-object CBVs: index 2 + CubeCount + LightSourceCount
+	CD3DX12_GPU_DESCRIPTOR_HANDLE lightDataHandle(gpuStart, 2 + CubeCount + LightSourceCount, m_heapDescriptorSize);
+	m_commandList->SetGraphicsRootDescriptorTable(2, lightDataHandle);
 
 	m_commandList->RSSetViewports(1, &m_viewport);
 	m_commandList->RSSetScissorRects(1, &m_scissorRect);
@@ -844,7 +1013,7 @@ void D3DAppImpl::PopulateCommandList()
 	m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
 	// Clear render target view
-	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
+	const float clearColor[] = { 0.05f, 0.05f, 0.05f, 1.0f };
 	m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
 
 	// Clear depth stencil view
@@ -854,9 +1023,22 @@ void D3DAppImpl::PopulateCommandList()
 	m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
 	m_commandList->IASetIndexBuffer(&m_indexBufferView);
 
+	// Draw normal cubes
+	m_commandList->SetPipelineState(m_cubePipelineState.Get());
 	for (UINT i = 0; i < CubeCount; ++i)
 	{
-		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 1 + i, m_heapDescriptorSize);
+		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 2 + i, m_heapDescriptorSize);
+		m_commandList->SetGraphicsRootDescriptorTable(1, cbvHandle);
+		m_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+	}
+
+	// Draw light cubes – standalone, using lightSourceShaders
+	m_commandList->SetPipelineState(m_lightSourcePipelineState.Get());
+
+	// Light CBVs start at index 2 + CubeCount
+	for (UINT i = 0; i < LightSourceCount; ++i)
+	{
+		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 2 + CubeCount + i, m_heapDescriptorSize);
 		m_commandList->SetGraphicsRootDescriptorTable(1, cbvHandle);
 		m_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 	}
