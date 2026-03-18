@@ -46,9 +46,10 @@ private:
 	struct LightDataConstantBuffer
 	{
 		XMFLOAT3 lightPosition; // 12
-		float pad0;             // 4
+		float padding0;			// 4
+		XMFLOAT4 lightColor;    // 16
 		XMFLOAT3 cameraPos;     // 12
-		float padding[57];      // 228 → total 256 bytes
+		float padding[53];      // 228 → total 256 bytes
 	};
 	static_assert((sizeof(LightDataConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
 
@@ -60,6 +61,13 @@ private:
 		float padding[16];
 	};
 	static_assert((sizeof(LightSourceConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
+
+	struct LightSourceDataConstantBuffer
+	{
+		XMFLOAT4 lightColor;
+		float padding[60];
+	};
+	static_assert((sizeof(LightSourceDataConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
 
 	// Pipeline objects.
 	CD3DX12_VIEWPORT m_viewport;
@@ -95,10 +103,13 @@ private:
 	LightDataConstantBuffer m_lightDataConstantBufferData[CubeCount];
 	ComPtr<ID3D12Resource> m_lightSourceConstantBuffer;
 	LightSourceConstantBuffer m_lightSourceConstantBufferData[LightSourceCount];
+	ComPtr<ID3D12Resource> m_lightSourceDataConstantBuffer;
+	LightSourceDataConstantBuffer m_lightSourceDataConstantBufferData[LightSourceCount];
 	ComPtr<ID3D12Resource> m_depthBuffer;
 	UINT8* m_pCubeCbvDataBegin;
 	UINT8* m_pLightDataCbvDataBegin;
-	UINT8* m_pLightCbvDataBegin;
+	UINT8* m_pLightSourceCbvDataBegin;
+	UINT8* m_pLightSourceDataCbvDataBegin;
 
 	// Synchronization objects.
 	UINT m_frameIndex;
@@ -123,6 +134,9 @@ private:
 	float m_yaw;
 	float m_pitch;
 	float m_mouseSensitivity;
+
+	// Scene properties
+	XMVECTOR m_lightColor;
 
 	void LoadPipeline();
 	void LoadAssets();
@@ -158,7 +172,8 @@ D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	m_frameIndex(0),
 	m_pCubeCbvDataBegin(nullptr),
 	m_pLightDataCbvDataBegin(nullptr),
-	m_pLightCbvDataBegin(nullptr),
+	m_pLightSourceCbvDataBegin(nullptr),
+	m_pLightSourceDataCbvDataBegin(nullptr),
 	m_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)),
 	m_scissorRect(0, 0, static_cast<LONG>(width), static_cast<LONG>(height)),
 	m_fenceValues{},
@@ -171,7 +186,8 @@ D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	m_cameraUp(XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)),
 	m_yaw(-90.0f),
 	m_pitch(0.0f),
-	m_mouseSensitivity(0.1f)
+	m_mouseSensitivity(0.1f),
+	m_lightColor(XMVectorSet(1.0f, 0.0f, 0.0f, 1.0f))
 {
 }
 
@@ -272,7 +288,7 @@ void D3DAppImpl::LoadPipeline()
 
 		// Need only one heap for both SRV and CBV
 		D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-		heapDesc.NumDescriptors = 2 + (2 * CubeCount) + LightSourceCount;
+		heapDesc.NumDescriptors = 2 + (2 * CubeCount) + (2 * LightSourceCount);
 		heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 		ThrowIfFailed(m_device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_heap)));
@@ -706,39 +722,6 @@ void D3DAppImpl::LoadAssets()
 		memcpy(m_pCubeCbvDataBegin, &m_cubeConstantBufferData, sizeof(m_cubeConstantBufferData));
 	}
 
-	// Create the constant buffer for light sources (b0 in light shaders)
-	{
-		const UINT constantBufferSize = sizeof(LightSourceConstantBuffer);
-		const UINT totalConstantBufferSize = constantBufferSize * LightSourceCount;
-
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&m_lightSourceConstantBuffer)
-		));
-
-		// Map and initialize the constant buffer. We don't unmap this until the
-		// app closes. Keeping things mapped for the lifetime of the resource is okay.
-		CD3DX12_RANGE readRange(0, 0);
-		ThrowIfFailed(m_lightSourceConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightCbvDataBegin)));
-
-		for (UINT i = 0; i < LightSourceCount; ++i)
-		{
-			// Describe and create a constant buffer view.
-			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-			cbvDesc.BufferLocation = m_lightSourceConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
-			cbvDesc.SizeInBytes = constantBufferSize;
-
-			m_device->CreateConstantBufferView(&cbvDesc, handle);
-			handle.Offset(1, m_heapDescriptorSize);
-		}
-
-		memcpy(m_pLightCbvDataBegin, &m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
-	}
-
 	// Create the constant buffer for light data used by cube shaders (b1)
 	{
 		const UINT constantBufferSize = sizeof(LightDataConstantBuffer);
@@ -766,6 +749,72 @@ void D3DAppImpl::LoadAssets()
 		}
 
 		memcpy(m_pLightDataCbvDataBegin, m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
+	}
+
+	// Create the constant buffer for light sources (b0 in light shaders)
+	{
+		const UINT constantBufferSize = sizeof(LightSourceConstantBuffer);
+		const UINT totalConstantBufferSize = constantBufferSize * LightSourceCount;
+
+		ThrowIfFailed(m_device->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_PPV_ARGS(&m_lightSourceConstantBuffer)
+		));
+
+		// Map and initialize the constant buffer. We don't unmap this until the
+		// app closes. Keeping things mapped for the lifetime of the resource is okay.
+		CD3DX12_RANGE readRange(0, 0);
+		ThrowIfFailed(m_lightSourceConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightSourceCbvDataBegin)));
+
+		for (UINT i = 0; i < LightSourceCount; ++i)
+		{
+			// Describe and create a constant buffer view.
+			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+			cbvDesc.BufferLocation = m_lightSourceConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
+			cbvDesc.SizeInBytes = constantBufferSize;
+
+			m_device->CreateConstantBufferView(&cbvDesc, handle);
+			handle.Offset(1, m_heapDescriptorSize);
+		}
+
+		memcpy(m_pLightSourceCbvDataBegin, &m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
+	}
+
+	// Create the constant buffer for light sources data (b1 in light shaders)
+	{
+		const UINT constantBufferSize = sizeof(LightSourceDataConstantBuffer);
+		const UINT totalConstantBufferSize = constantBufferSize * LightSourceCount;
+
+		ThrowIfFailed(m_device->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+			D3D12_HEAP_FLAG_NONE,
+			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_PPV_ARGS(&m_lightSourceDataConstantBuffer)
+		));
+
+		// Map and initialize the constant buffer. We don't unmap this until the
+		// app closes. Keeping things mapped for the lifetime of the resource is okay.
+		CD3DX12_RANGE readRange(0, 0);
+		ThrowIfFailed(m_lightSourceDataConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightSourceDataCbvDataBegin)));
+
+		for (UINT i = 0; i < LightSourceCount; ++i)
+		{
+			// Describe and create a constant buffer view.
+			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+			cbvDesc.BufferLocation = m_lightSourceDataConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
+			cbvDesc.SizeInBytes = constantBufferSize;
+
+			m_device->CreateConstantBufferView(&cbvDesc, handle);
+			handle.Offset(1, m_heapDescriptorSize);
+		}
+
+		memcpy(m_pLightSourceDataCbvDataBegin, &m_lightSourceDataConstantBufferData, sizeof(m_lightSourceDataConstantBufferData));
 	}
 
 	// Close the command list and execute it to begin the initial GPU setup.
@@ -869,10 +918,12 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 		XMStoreFloat4x4(&m_cubeConstantBufferData[i].model, XMMatrixTranspose(world));
 
 		// Store the normal matrix (ensure your struct has a float4x4 normalMatrix field)
-		XMStoreFloat4x4(&m_cubeConstantBufferData[i].normalMatrix, XMMatrixTranspose(world));
+		XMMATRIX worldInverse = XMMatrixInverse(nullptr, world);
+		XMStoreFloat4x4(&m_cubeConstantBufferData[i].normalMatrix, worldInverse);
 
 		XMVECTOR lightPosWorld = XMLoadFloat3(&lightSourcePositions[0]);
 		XMStoreFloat3(&m_lightDataConstantBufferData[i].lightPosition, lightPosWorld);
+		XMStoreFloat4(&m_lightDataConstantBufferData[i].lightColor, m_lightColor);
 		XMStoreFloat3(&m_lightDataConstantBufferData[i].cameraPos, m_cameraPos);
 	}
 
@@ -891,11 +942,13 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].projection, XMMatrixTranspose(proj));
 		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].view, XMMatrixTranspose(view));
 		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].model, XMMatrixTranspose(world));
+		XMStoreFloat4(&m_lightSourceDataConstantBufferData[i].lightColor, m_lightColor);
 	}
 
 	memcpy(m_pCubeCbvDataBegin, m_cubeConstantBufferData, sizeof(m_cubeConstantBufferData));
 	memcpy(m_pLightDataCbvDataBegin, &m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
-	memcpy(m_pLightCbvDataBegin, m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
+	memcpy(m_pLightSourceCbvDataBegin, m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
+	memcpy(m_pLightSourceDataCbvDataBegin, m_lightSourceDataConstantBufferData, sizeof(m_lightSourceDataConstantBufferData));
 }
 
 void D3DAppImpl::OnRender(const Timer& timer)
@@ -1042,8 +1095,8 @@ void D3DAppImpl::PopulateCommandList()
 		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 2 + i, m_heapDescriptorSize);
 		m_commandList->SetGraphicsRootDescriptorTable(1, cbvHandle);
 
-		// Light data CBVs start at index 2 + CubeCount + LightSourceCount
-		CD3DX12_GPU_DESCRIPTOR_HANDLE lightDataHandle(gpuStart, 2 + CubeCount + LightSourceCount + i, m_heapDescriptorSize);
+		// Light data CBVs start at index 2 + CubeCount
+		CD3DX12_GPU_DESCRIPTOR_HANDLE lightDataHandle(gpuStart, 2 + CubeCount + i, m_heapDescriptorSize);
 		m_commandList->SetGraphicsRootDescriptorTable(2, lightDataHandle);
 
 		m_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
@@ -1055,8 +1108,13 @@ void D3DAppImpl::PopulateCommandList()
 	// Light CBVs start at index 2 + CubeCount
 	for (UINT i = 0; i < LightSourceCount; ++i)
 	{
-		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 2 + CubeCount + i, m_heapDescriptorSize);
+		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 2 + (2 * CubeCount) + i, m_heapDescriptorSize);
 		m_commandList->SetGraphicsRootDescriptorTable(1, cbvHandle);
+
+		// Light data CBVs start at index 2 + CubeCount + LightSourceCount
+		CD3DX12_GPU_DESCRIPTOR_HANDLE lightDataHandle(gpuStart, 2 + (2 * CubeCount) + LightSourceCount + i, m_heapDescriptorSize);
+		m_commandList->SetGraphicsRootDescriptorTable(2, lightDataHandle);
+
 		m_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 	}
 

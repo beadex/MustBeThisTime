@@ -11,8 +11,9 @@ cbuffer LightConstantBuffer : register(b1)
 {
     float3 lightPosition;
     float padding0;
-    float3 cameraPos; // ← add
-    float padding1; // ← add
+    float4 lightColor;
+    float3 cameraPos;
+    float padding1;
 }
 
 struct VS_Input
@@ -51,28 +52,26 @@ PSInput VSMain(VS_Input input)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float3 lightColor = float3(1.0f, 1.0f, 1.0f);
-
     float ambientStrength = 0.2f;
-    float3 ambient = ambientStrength * lightColor;
+    float4 ambient = ambientStrength * lightColor;
 
     // Diffuse
     float3 norm = normalize(input.normal);
     float3 lightDir = normalize(lightPosition - input.worldPos);
     float diff = max(dot(norm, lightDir), 0.0f);
-    float3 diffuse = diff * lightColor;
+    float4 diffuse = diff * lightColor;
 
     // Specular
     float specularStrength = 1.0f;
     float3 viewDir = normalize(cameraPos - input.worldPos); // ← fix: use cameraPos
     float3 reflectDir = reflect(-lightDir, norm);
     float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 32);
-    float3 specular = specularStrength * spec * lightColor; // ← fix: float3
+    float4 specular = specularStrength * spec * lightColor; // ← fix: float3
     
-    float3 diffuseMapColor = g_diffuseMap.Sample(g_sampler, input.uv).rgb;
-    float3 specularMapColor = g_specularMap.Sample(g_sampler, input.uv).rgb;
+    float4 diffuseMapColor = g_diffuseMap.Sample(g_sampler, input.uv).rgba;
+    float4 specularMapColor = g_specularMap.Sample(g_sampler, input.uv).rgba;
 
-    float3 result = ambient * diffuseMapColor + diffuse * diffuseMapColor + specular * specularMapColor;
+    float4 result = ambient * diffuseMapColor + diffuse * diffuseMapColor + specular * specularMapColor;
 
-    return float4(result, 1.0f);
+    return result;
 }
