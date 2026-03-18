@@ -13,6 +13,7 @@
 #include "DirectXTex.h"
 
 #include <d3dx12.h>
+#include <pix3.h>
 
 #include <string>
 #include <wrl.h>

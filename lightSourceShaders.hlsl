@@ -1,6 +1,8 @@
 cbuffer LightSourceConstantBuffer : register(b0)
 {
-    float4x4 mvp;
+    float4x4 model;
+    float4x4 view;
+    float4x4 projection;
 };
 
 struct PSInput
@@ -12,7 +14,9 @@ PSInput VSMain(float3 position : POSITION)
 {
     PSInput result;
 
-    result.position = mul(float4(position, 1.0f), mvp);
+    float4 worldPos = mul(float4(position, 1.0), model);
+    float4 viewPos = mul(worldPos, view);
+    result.position = mul(viewPos, projection);
 
     return result;
 }

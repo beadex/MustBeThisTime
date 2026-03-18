@@ -1,14 +1,26 @@
 cbuffer SceneConstantBuffer : register(b0)
 {
-    float4x4 mvp;
+    float4x4 model;
+    float4x4 view;
+    float4x4 projection;
+    float4x4 normalMatrix;
 };
 
 // New: light data
 cbuffer LightConstantBuffer : register(b1)
 {
     float3 lightPosition;
-    float padding0; // keep 16-byte alignment
+    float padding0;
+    float3 cameraPos; // ← add
+    float padding1; // ← add
 }
+
+struct VS_Input
+{
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+    float2 uv : TEXCOORD;
+};
 
 struct PSInput
 {
@@ -22,41 +34,45 @@ Texture2D g_diffuseMap : register(t0);
 Texture2D g_specularMap : register(t1);
 SamplerState g_sampler : register(s0);
 
-PSInput VSMain(float3 position : POSITION, float3 normal : NORMAL, float2 uv : TEXCOORD)
+PSInput VSMain(VS_Input input)
 {
     PSInput result;
+    float4 worldPos = mul(float4(input.position, 1.0), model);
+    result.worldPos = worldPos.xyz;
 
-    // still using mvp for clip-space
-    result.position = mul(float4(position, 1.0f), mvp);
-
-    // for now treat object space as world space (your cubes share same unit mesh)
-    result.worldPos = position;
-
-    result.normal = normalize(normal);
-    result.uv = uv;
+    // Use the 3x3 part of the matrix for the normal
+    result.normal = normalize(mul(input.normal, (float3x3) normalMatrix));
+    
+    result.position = mul(mul(worldPos, view), projection);
+    result.uv = input.uv;
 
     return result;
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    // Real light direction from fragment to light (approx: object space == world space)
-    float3 fragPos = input.worldPos;
-    float3 L = normalize(lightPosition - fragPos);
-
-    float3 n = normalize(input.normal);
-    float diff = max(dot(n, L), 0.0f);
-
-    float3 baseDiffuse = g_diffuseMap.Sample(g_sampler, input.uv).rgb;
-    float3 baseSpecular = g_specularMap.Sample(g_sampler, input.uv).rgb;
+    float3 lightColor = float3(1.0f, 1.0f, 1.0f);
 
     float ambientStrength = 0.2f;
-    float specularStrength = 0.3f;
+    float3 ambient = ambientStrength * lightColor;
 
-    float3 ambient = ambientStrength * baseDiffuse;
-    float3 diffuse = diff * baseDiffuse;
-    float3 specular = specularStrength * diff * baseSpecular;
+    // Diffuse
+    float3 norm = normalize(input.normal);
+    float3 lightDir = normalize(lightPosition - input.worldPos);
+    float diff = max(dot(norm, lightDir), 0.0f);
+    float3 diffuse = diff * lightColor;
 
-    float3 color = ambient + diffuse + specular;
-    return float4(color, 1.0f);
+    // Specular
+    float specularStrength = 1.0f;
+    float3 viewDir = normalize(cameraPos - input.worldPos); // ← fix: use cameraPos
+    float3 reflectDir = reflect(-lightDir, norm);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 32);
+    float3 specular = specularStrength * spec * lightColor; // ← fix: float3
+    
+    float3 diffuseMapColor = g_diffuseMap.Sample(g_sampler, input.uv).rgb;
+    float3 specularMapColor = g_specularMap.Sample(g_sampler, input.uv).rgb;
+
+    float3 result = ambient * diffuseMapColor + diffuse * diffuseMapColor + specular * specularMapColor;
+
+    return float4(result, 1.0f);
 }

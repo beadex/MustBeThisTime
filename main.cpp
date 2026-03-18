@@ -30,28 +30,34 @@ private:
 	struct Vertex
 	{
 		XMFLOAT3 position;
-        XMFLOAT3 normal;
+		XMFLOAT3 normal;
 		XMFLOAT2 uv;
 	};
 
 	struct SceneConstantBuffer
 	{
-		XMFLOAT4X4 mvp;
-		float padding[48]; // Padding so the constant buffer is 256-byte aligned (64 + 192 = 256)
+		XMFLOAT4X4 model;
+		XMFLOAT4X4 view;
+		XMFLOAT4X4 projection;
+		XMFLOAT4X4 normalMatrix;
 	};
 	static_assert((sizeof(SceneConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
 
 	struct LightDataConstantBuffer
 	{
-		XMFLOAT3 lightPosition;
-		float padding[61]; // 64 bytes total, 16-byte aligned
+		XMFLOAT3 lightPosition; // 12
+		float pad0;             // 4
+		XMFLOAT3 cameraPos;     // 12
+		float padding[57];      // 228 → total 256 bytes
 	};
 	static_assert((sizeof(LightDataConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
 
 	struct LightSourceConstantBuffer
 	{
-		XMFLOAT4X4 mvp;
-		float padding[48];
+		XMFLOAT4X4 model;
+		XMFLOAT4X4 view;
+		XMFLOAT4X4 projection;
+		float padding[16];
 	};
 	static_assert((sizeof(LightSourceConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
 
@@ -85,12 +91,12 @@ private:
 	ComPtr<ID3D12Resource> m_specularTexture;  // specular
 	ComPtr<ID3D12Resource> m_cubeConstantBuffer;
 	SceneConstantBuffer m_cubeConstantBufferData[CubeCount];
- ComPtr<ID3D12Resource> m_lightDataConstantBuffer; // for cube shader b1
-	LightDataConstantBuffer m_lightDataConstantBufferData;
+	ComPtr<ID3D12Resource> m_lightDataConstantBuffer; // for cube shader b1
+	LightDataConstantBuffer m_lightDataConstantBufferData[CubeCount];
 	ComPtr<ID3D12Resource> m_lightSourceConstantBuffer;
 	LightSourceConstantBuffer m_lightSourceConstantBufferData[LightSourceCount];
 	ComPtr<ID3D12Resource> m_depthBuffer;
- UINT8* m_pCubeCbvDataBegin;
+	UINT8* m_pCubeCbvDataBegin;
 	UINT8* m_pLightDataCbvDataBegin;
 	UINT8* m_pLightCbvDataBegin;
 
@@ -151,8 +157,8 @@ D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	D3DApp(width, height, name),
 	m_frameIndex(0),
 	m_pCubeCbvDataBegin(nullptr),
-      m_pLightDataCbvDataBegin(nullptr),
-		m_pLightCbvDataBegin(nullptr),
+	m_pLightDataCbvDataBegin(nullptr),
+	m_pLightCbvDataBegin(nullptr),
 	m_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)),
 	m_scissorRect(0, 0, static_cast<LONG>(width), static_cast<LONG>(height)),
 	m_fenceValues{},
@@ -160,7 +166,7 @@ D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	m_cubeConstantBufferData{},
 	m_lightSourceConstantBufferData{},
 	m_cameraSpeed(5.0f),
-	m_cameraPos(XMVectorSet(0.0f, 0.0f, 3.0f, 1.0f)),
+	m_cameraPos(XMVectorSet(2.2f, 1.6f, 7.0f, 1.0f)),
 	m_cameraFront(XMVectorSet(0.0f, 0.0f, -1.0f, 0.0f)),
 	m_cameraUp(XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)),
 	m_yaw(-90.0f),
@@ -266,7 +272,7 @@ void D3DAppImpl::LoadPipeline()
 
 		// Need only one heap for both SRV and CBV
 		D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-		heapDesc.NumDescriptors = 2 + CubeCount + LightSourceCount + 1;
+		heapDesc.NumDescriptors = 2 + (2 * CubeCount) + LightSourceCount;
 		heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 		ThrowIfFailed(m_device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_heap)));
@@ -338,7 +344,7 @@ void D3DAppImpl::LoadAssets()
 			featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
 		}
 
-        CD3DX12_DESCRIPTOR_RANGE1 ranges[3];
+		CD3DX12_DESCRIPTOR_RANGE1 ranges[3];
 		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
 		ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC); // per-object (b0)
 		ranges[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 1, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC); // light data (b1)
@@ -388,7 +394,7 @@ void D3DAppImpl::LoadAssets()
 		ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(L"cubeShaders_VSMain.cso").c_str(), &pVertexShaderData, &vertexShaderDataLength));
 		ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(L"cubeShaders_PSMain.cso").c_str(), &pPixelShaderData, &pixelShaderDataLength));
 
-       // Define the vertex input layout (position, normal, uv)
+		// Define the vertex input layout (position, normal, uv)
 		D3D12_INPUT_ELEMENT_DESC inputElementDescs[] =
 		{
 			{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -431,7 +437,7 @@ void D3DAppImpl::LoadAssets()
 		ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(L"lightSourceShaders_VSMain.cso").c_str(), &pVertexShaderData, &vertexShaderDataLength));
 		ThrowIfFailed(ReadDataFromFile(GetAssetFullPath(L"lightSourceShaders_PSMain.cso").c_str(), &pPixelShaderData, &pixelShaderDataLength));
 
-       // Define the vertex input layout for light source cubes (position only)
+		// Define the vertex input layout for light source cubes (position only)
 		D3D12_INPUT_ELEMENT_DESC inputElementDescs[] =
 		{
 			{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
@@ -465,44 +471,44 @@ void D3DAppImpl::LoadAssets()
 	// Create the command list.
 	ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocators[m_frameIndex].Get(), m_cubePipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
 
-    // Create the vertex buffer.
+	// Create the vertex buffer.
 	{
 		Vertex vertices[] = {
-      // Front face (z = -1), normal (0, 0, -1)
-		{ {-1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f} },
-		{ {-1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f} },
-		{ { 1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 0.0f} },
-		{ { 1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f} },
+			// Front face (z = -1), normal (0, 0, -1)
+			  { {-1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f} },
+			  { {-1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f} },
+			  { { 1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 0.0f} },
+			  { { 1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f} },
 
-		// Back face (z = 1), normal (0, 0, 1)
-		{ { 1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f} },
-		{ { 1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} },
-		{ {-1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f} },
-		{ {-1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f} },
+			  // Back face (z = 1), normal (0, 0, 1)
+			  { { 1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f} },
+			  { { 1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} },
+			  { {-1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f} },
+			  { {-1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f} },
 
-		// Left face (x = -1), normal (-1, 0, 0)
-		{ {-1.0f, -1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
-		{ {-1.0f,  1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
-		{ {-1.0f,  1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
-		{ {-1.0f, -1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
+			  // Left face (x = -1), normal (-1, 0, 0)
+			  { {-1.0f, -1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
+			  { {-1.0f,  1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
+			  { {-1.0f,  1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
+			  { {-1.0f, -1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
 
-		// Right face (x = 1), normal (1, 0, 0)
-		{ { 1.0f, -1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
-		{ { 1.0f,  1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
-		{ { 1.0f,  1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
-		{ { 1.0f, -1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
+			  // Right face (x = 1), normal (1, 0, 0)
+			  { { 1.0f, -1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
+			  { { 1.0f,  1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
+			  { { 1.0f,  1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
+			  { { 1.0f, -1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
 
-		// Top face (y = 1), normal (0, 1, 0)
-		{ {-1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 1.0f} },
-		{ {-1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f} },
-		{ { 1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 0.0f} },
-		{ { 1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f} },
+			  // Top face (y = 1), normal (0, 1, 0)
+			  { {-1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 1.0f} },
+			  { {-1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f} },
+			  { { 1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 0.0f} },
+			  { { 1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f} },
 
-		// Bottom face (y = -1), normal (0, -1, 0)
-		{ {-1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 1.0f} },
-		{ {-1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f} },
-		{ { 1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 0.0f} },
-		{ { 1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f} },
+			  // Bottom face (y = -1), normal (0, -1, 0)
+			  { {-1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 1.0f} },
+			  { {-1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f} },
+			  { { 1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 0.0f} },
+			  { { 1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f} },
 		};
 
 		UINT16 indices[] =
@@ -667,7 +673,7 @@ void D3DAppImpl::LoadAssets()
 	// SRV for specular at heap slot 1
 	LoadTextureAndCreateSrv(specularPath, m_specularTexture, textureUploadHeapSpecular, handle);
 
- // Create the constant buffer for all cubes (b0)
+	// Create the constant buffer for all cubes (b0)
 	{
 		const UINT constantBufferSize = sizeof(SceneConstantBuffer);
 		const UINT totalConstantBufferSize = constantBufferSize * CubeCount;
@@ -700,7 +706,7 @@ void D3DAppImpl::LoadAssets()
 		memcpy(m_pCubeCbvDataBegin, &m_cubeConstantBufferData, sizeof(m_cubeConstantBufferData));
 	}
 
- // Create the constant buffer for light sources (b0 in light shaders)
+	// Create the constant buffer for light sources (b0 in light shaders)
 	{
 		const UINT constantBufferSize = sizeof(LightSourceConstantBuffer);
 		const UINT totalConstantBufferSize = constantBufferSize * LightSourceCount;
@@ -730,13 +736,13 @@ void D3DAppImpl::LoadAssets()
 			handle.Offset(1, m_heapDescriptorSize);
 		}
 
-        memcpy(m_pLightCbvDataBegin, &m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
+		memcpy(m_pLightCbvDataBegin, &m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
 	}
 
 	// Create the constant buffer for light data used by cube shaders (b1)
 	{
 		const UINT constantBufferSize = sizeof(LightDataConstantBuffer);
-		const UINT totalConstantBufferSize = constantBufferSize;
+		const UINT totalConstantBufferSize = constantBufferSize * CubeCount; // ← was just constantBufferSize
 
 		ThrowIfFailed(m_device->CreateCommittedResource(
 			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
@@ -750,14 +756,16 @@ void D3DAppImpl::LoadAssets()
 		CD3DX12_RANGE readRange(0, 0);
 		ThrowIfFailed(m_lightDataConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightDataCbvDataBegin)));
 
-		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-		cbvDesc.BufferLocation = m_lightDataConstantBuffer->GetGPUVirtualAddress();
-		cbvDesc.SizeInBytes = constantBufferSize;
-		m_device->CreateConstantBufferView(&cbvDesc, handle);
-		// handle.Offset(1, m_heapDescriptorSize); // last descriptor, no need to offset further
+		for (UINT i = 0; i < CubeCount; ++i) // ← was a single CBV
+		{
+			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+			cbvDesc.BufferLocation = m_lightDataConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
+			cbvDesc.SizeInBytes = constantBufferSize;
+			m_device->CreateConstantBufferView(&cbvDesc, handle);
+			handle.Offset(1, m_heapDescriptorSize);
+		}
 
-		ZeroMemory(&m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
-		memcpy(m_pLightDataCbvDataBegin, &m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
+		memcpy(m_pLightDataCbvDataBegin, m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
 	}
 
 	// Close the command list and execute it to begin the initial GPU setup.
@@ -802,7 +810,7 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 
 	static const XMFLOAT3 lightSourcePositions[LightSourceCount] =
 	{
-		{ 0.0f,  0.0f,  -20.0f },
+		{ 1.2f, 1.0f, -6.0f },
 	};
 
 	const float deltaTime = timer.DeltaTime();
@@ -855,9 +863,17 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 		);
 
 		XMMATRIX world = mRotate * mTranslate;
-		XMMATRIX mvp = world * view * proj;
 
-		XMStoreFloat4x4(&m_cubeConstantBufferData[i].mvp, XMMatrixTranspose(mvp));
+		XMStoreFloat4x4(&m_cubeConstantBufferData[i].projection, XMMatrixTranspose(proj));
+		XMStoreFloat4x4(&m_cubeConstantBufferData[i].view, XMMatrixTranspose(view));
+		XMStoreFloat4x4(&m_cubeConstantBufferData[i].model, XMMatrixTranspose(world));
+
+		// Store the normal matrix (ensure your struct has a float4x4 normalMatrix field)
+		XMStoreFloat4x4(&m_cubeConstantBufferData[i].normalMatrix, XMMatrixTranspose(world));
+
+		XMVECTOR lightPosWorld = XMLoadFloat3(&lightSourcePositions[0]);
+		XMStoreFloat3(&m_lightDataConstantBufferData[i].lightPosition, lightPosWorld);
+		XMStoreFloat3(&m_lightDataConstantBufferData[i].cameraPos, m_cameraPos);
 	}
 
 	for (UINT i = 0; i < LightSourceCount; ++i)
@@ -870,15 +886,14 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 
 		XMMATRIX mScale = XMMatrixScaling(0.3f, 0.3f, 0.3f);
 
-		XMMATRIX world = mTranslate * mScale;
-		XMMATRIX mvp = world * view * proj;
+		XMMATRIX world = mScale * mTranslate;
 
-		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].mvp, XMMatrixTranspose(mvp));
+		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].projection, XMMatrixTranspose(proj));
+		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].view, XMMatrixTranspose(view));
+		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].model, XMMatrixTranspose(world));
 	}
 
 	memcpy(m_pCubeCbvDataBegin, m_cubeConstantBufferData, sizeof(m_cubeConstantBufferData));
- // Use the first light source as directional light origin for cube shader
-	m_lightDataConstantBufferData.lightPosition = lightSourcePositions[0];
 	memcpy(m_pLightDataCbvDataBegin, &m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
 	memcpy(m_pLightCbvDataBegin, m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
 }
@@ -996,9 +1011,6 @@ void D3DAppImpl::PopulateCommandList()
 
 	CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(gpuStart, 0, m_heapDescriptorSize);
 	m_commandList->SetGraphicsRootDescriptorTable(0, srvHandle);
-	// Light data CBV (b1) is after SRVs and all per-object CBVs: index 2 + CubeCount + LightSourceCount
-	CD3DX12_GPU_DESCRIPTOR_HANDLE lightDataHandle(gpuStart, 2 + CubeCount + LightSourceCount, m_heapDescriptorSize);
-	m_commandList->SetGraphicsRootDescriptorTable(2, lightDataHandle);
 
 	m_commandList->RSSetViewports(1, &m_viewport);
 	m_commandList->RSSetScissorRects(1, &m_scissorRect);
@@ -1029,6 +1041,11 @@ void D3DAppImpl::PopulateCommandList()
 	{
 		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 2 + i, m_heapDescriptorSize);
 		m_commandList->SetGraphicsRootDescriptorTable(1, cbvHandle);
+
+		// Light data CBVs start at index 2 + CubeCount + LightSourceCount
+		CD3DX12_GPU_DESCRIPTOR_HANDLE lightDataHandle(gpuStart, 2 + CubeCount + LightSourceCount + i, m_heapDescriptorSize);
+		m_commandList->SetGraphicsRootDescriptorTable(2, lightDataHandle);
+
 		m_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 	}
 
