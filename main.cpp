@@ -76,7 +76,6 @@ private:
 	ComPtr<ID3D12Device> m_device;
 	ComPtr<ID3D12Resource> m_renderTargets[FrameCount];
 	ComPtr<ID3D12CommandAllocator> m_commandAllocators[FrameCount];
-	ComPtr<ID3D12CommandAllocator> m_bundleAllocators[FrameCount];
 	ComPtr<ID3D12CommandQueue> m_commandQueue;
 	ComPtr<ID3D12RootSignature> m_rootSignature;
 	ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
@@ -85,7 +84,6 @@ private:
 	ComPtr<ID3D12PipelineState> m_cubePipelineState;
 	ComPtr<ID3D12PipelineState> m_lightSourcePipelineState;
 	ComPtr<ID3D12GraphicsCommandList> m_commandList;
-	ComPtr<ID3D12GraphicsCommandList> m_bundle;
 	UINT m_rtvDescriptorSize;
 	UINT m_dsvDescriptorSize;
 	UINT m_heapDescriptorSize;
@@ -341,7 +339,6 @@ void D3DAppImpl::LoadPipeline()
 			rtvHandle.Offset(1, m_rtvDescriptorSize);
 
 			ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocators[n])));
-			ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_BUNDLE, IID_PPV_ARGS(&m_bundleAllocators[n])));
 		}
 	}
 }
@@ -371,10 +368,11 @@ void D3DAppImpl::LoadAssets()
 		rootParameters[2].InitAsDescriptorTable(1, &ranges[2], D3D12_SHADER_VISIBILITY_PIXEL);
 
 		D3D12_STATIC_SAMPLER_DESC sampler = {};
-		sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-		sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-		sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-		sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+		sampler.Filter = D3D12_FILTER_ANISOTROPIC;
+		sampler.MaxAnisotropy = 8;
+		sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+		sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+		sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 		sampler.MipLODBias = 0;
 		sampler.MaxAnisotropy = 0;
 		sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
@@ -441,6 +439,9 @@ void D3DAppImpl::LoadAssets()
 		psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 		psoDesc.SampleDesc.Count = 1;
 		ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_cubePipelineState)));
+
+		delete[] pVertexShaderData;
+		delete[] pPixelShaderData;
 	}
 
 	// Create the light source pipeline state, which includes compiling and loading shaders.
@@ -482,362 +483,406 @@ void D3DAppImpl::LoadAssets()
 		psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 		psoDesc.SampleDesc.Count = 1;
 		ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_lightSourcePipelineState)));
+		delete[] pVertexShaderData;
+		delete[] pPixelShaderData;
 	}
 
 	// Create the command list.
 	ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocators[m_frameIndex].Get(), m_cubePipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
 
-	// Create the vertex buffer.
-	{
-		Vertex vertices[] = {
-			// Front face (z = -1), normal (0, 0, -1)
-			  { {-1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f} },
-			  { {-1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f} },
-			  { { 1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 0.0f} },
-			  { { 1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f} },
-
-			  // Back face (z = 1), normal (0, 0, 1)
-			  { { 1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f} },
-			  { { 1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} },
-			  { {-1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f} },
-			  { {-1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f} },
-
-			  // Left face (x = -1), normal (-1, 0, 0)
-			  { {-1.0f, -1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
-			  { {-1.0f,  1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
-			  { {-1.0f,  1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
-			  { {-1.0f, -1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
-
-			  // Right face (x = 1), normal (1, 0, 0)
-			  { { 1.0f, -1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
-			  { { 1.0f,  1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
-			  { { 1.0f,  1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
-			  { { 1.0f, -1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
-
-			  // Top face (y = 1), normal (0, 1, 0)
-			  { {-1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 1.0f} },
-			  { {-1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f} },
-			  { { 1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 0.0f} },
-			  { { 1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f} },
-
-			  // Bottom face (y = -1), normal (0, -1, 0)
-			  { {-1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 1.0f} },
-			  { {-1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f} },
-			  { { 1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 0.0f} },
-			  { { 1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f} },
-		};
-
-		UINT16 indices[] =
-		{
-			// Front
-			 0,  1,  2,   0,  2,  3,
-			 // Back
-			  4,  5,  6,   4,  6,  7,
-			  // Left
-			   8,  9, 10,   8, 10, 11,
-			   // Right
-				12, 13, 14,  12, 14, 15,
-				// Top
-				 16, 17, 18,  16, 18, 19,
-				 // Bottom
-				  20, 21, 22,  20, 22, 23,
-		};
-
-
-		const UINT vertexBufferSize = sizeof(vertices);
-
-		// Note: using upload heaps to transfer static data like vert buffers is not 
-		// recommended. Every time the GPU needs it, the upload heap will be marshalled 
-		// over. Please read up on Default Heap usage. An upload heap is used here for 
-		// code simplicity and because there are very few verts to actually transfer.
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&m_vertexBuffer)
-		));
-
-		UINT8* pVertexDataBegin;
-		CD3DX12_RANGE vertexDataReadRange(0, 0); // We dont intend to read from this resource on the CPU.
-		ThrowIfFailed(m_vertexBuffer->Map(0, &vertexDataReadRange, reinterpret_cast<void**>(&pVertexDataBegin)));
-		memcpy(pVertexDataBegin, vertices, sizeof(vertices));
-		m_vertexBuffer->Unmap(0, nullptr);
-
-		// Initialize the vertex buffer view.
-		m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
-		m_vertexBufferView.StrideInBytes = sizeof(Vertex);
-		m_vertexBufferView.SizeInBytes = vertexBufferSize;
-
-		const UINT indexBufferSize = sizeof(indices);
-
-		// Index buffer
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(indexBufferSize),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&m_indexBuffer)
-		));
-
-		UINT8* pIndexDataBegin;
-		CD3DX12_RANGE indexDataReadRange(0, 0); // We dont intend to read from this resource on the CPU.
-		ThrowIfFailed(m_indexBuffer->Map(0, &indexDataReadRange, reinterpret_cast<void**>(&pIndexDataBegin)));
-		memcpy(pIndexDataBegin, indices, sizeof(indices));
-		m_indexBuffer->Unmap(0, nullptr);
-
-		// Initialize the vertex buffer view.
-		m_indexBufferView.BufferLocation = m_indexBuffer->GetGPUVirtualAddress();
-		m_indexBufferView.Format = DXGI_FORMAT_R16_UINT;
-		m_indexBufferView.SizeInBytes = indexBufferSize;
-
-	}
-
-	CD3DX12_CPU_DESCRIPTOR_HANDLE handle(m_heap->GetCPUDescriptorHandleForHeapStart());
-
-	// Note: ComPtr's are CPU objects but this resource needs to stay in scope until
-	// the command list that references it has finished executing on the GPU.
-	// We will flush the GPU at the end of this method to ensure the resource is not
-	// prematurely destroyed.
+	// Declare staging buffers at function scope — must outlive command list execution
+	ComPtr<ID3D12Resource> vertexUploadHeap;
+	ComPtr<ID3D12Resource> indexUploadHeap;
 	ComPtr<ID3D12Resource> textureUploadHeapDiffuse;
 	ComPtr<ID3D12Resource> textureUploadHeapSpecular;
 
-	auto LoadTextureAndCreateSrv = [&](const std::wstring& path,
-		ComPtr<ID3D12Resource>& texture,
-		ComPtr<ID3D12Resource>& uploadHeap,
-		CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandleOut)
+	// Create the vertex buffer.
+	{
+		// Create the vertex and index buffers.
 		{
-			TexMetadata metadata = {};
-			ScratchImage scratchImage;
+			Vertex vertices[] = {
+				// Front face (z = -1), normal (0, 0, -1)
+				  { {-1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f} },
+				  { {-1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f} },
+				  { { 1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 0.0f} },
+				  { { 1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f} },
 
-			ThrowIfFailed(LoadFromWICFile(
-				path.c_str(),
-				WIC_FLAGS_FORCE_RGB,
-				&metadata,
-				scratchImage
+				  // Back face (z = 1), normal (0, 0, 1)
+				  { { 1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f} },
+				  { { 1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} },
+				  { {-1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f} },
+				  { {-1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f} },
+
+				  // Left face (x = -1), normal (-1, 0, 0)
+				  { {-1.0f, -1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
+				  { {-1.0f,  1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
+				  { {-1.0f,  1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
+				  { {-1.0f, -1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
+
+				  // Right face (x = 1), normal (1, 0, 0)
+				  { { 1.0f, -1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
+				  { { 1.0f,  1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
+				  { { 1.0f,  1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
+				  { { 1.0f, -1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
+
+				  // Top face (y = 1), normal (0, 1, 0)
+				  { {-1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 1.0f} },
+				  { {-1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f} },
+				  { { 1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 0.0f} },
+				  { { 1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f} },
+
+				  // Bottom face (y = -1), normal (0, -1, 0)
+				  { {-1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 1.0f} },
+				  { {-1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f} },
+				  { { 1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 0.0f} },
+				  { { 1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f} },
+			};
+
+			UINT16 indices[] =
+			{
+				// Front
+				 0,  1,  2,   0,  2,  3,
+				 // Back
+				  4,  5,  6,   4,  6,  7,
+				  // Left
+				   8,  9, 10,   8, 10, 11,
+				   // Right
+					12, 13, 14,  12, 14, 15,
+					// Top
+					 16, 17, 18,  16, 18, 19,
+					 // Bottom
+					  20, 21, 22,  20, 22, 23,
+			};
+
+			const UINT vertexBufferSize = sizeof(vertices);
+			const UINT indexBufferSize = sizeof(indices);
+
+			// 1. Create GPU-resident (DEFAULT) buffers as copy destinations
+			ThrowIfFailed(m_device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				nullptr,
+				IID_PPV_ARGS(&m_vertexBuffer)
 			));
-
-			// Describe and create a Texture2D
-			D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
-				metadata.format,
-				static_cast<UINT64>(metadata.width),
-				static_cast<UINT>(metadata.height),
-				static_cast<UINT16>(metadata.arraySize),
-				static_cast<UINT16>(metadata.mipLevels)
-			);
 
 			ThrowIfFailed(m_device->CreateCommittedResource(
 				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
 				D3D12_HEAP_FLAG_NONE,
-				&textureDesc,
+				&CD3DX12_RESOURCE_DESC::Buffer(indexBufferSize),
 				D3D12_RESOURCE_STATE_COPY_DEST,
 				nullptr,
-				IID_PPV_ARGS(&texture)
+				IID_PPV_ARGS(&m_indexBuffer)
 			));
 
-			const UINT subresourceCount = static_cast<UINT>(scratchImage.GetImageCount());
-			const UINT64 uploadBufferSize = GetRequiredIntermediateSize(texture.Get(), 0, subresourceCount);
-
-			// Create the GPU upload buffer
+			// 2. Create CPU-visible (UPLOAD) staging buffers
 			ThrowIfFailed(m_device->CreateCommittedResource(
 				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
 				D3D12_HEAP_FLAG_NONE,
-				&CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize),
+				&CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize),
 				D3D12_RESOURCE_STATE_GENERIC_READ,
 				nullptr,
-				IID_PPV_ARGS(&uploadHeap)
+				IID_PPV_ARGS(&vertexUploadHeap)
 			));
 
-			std::vector<D3D12_SUBRESOURCE_DATA> subresources;
-			subresources.reserve(subresourceCount);
+			ThrowIfFailed(m_device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(indexBufferSize),
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&indexUploadHeap)
+			));
 
-			const Image* images = scratchImage.GetImages();
+			// 3. Copy CPU data → upload heaps
+			CD3DX12_RANGE readRange(0, 0);
 
-			for (UINT i = 0; i < subresourceCount; ++i)
+			UINT8* pMapped = nullptr;
+			ThrowIfFailed(vertexUploadHeap->Map(0, &readRange, reinterpret_cast<void**>(&pMapped)));
+			memcpy(pMapped, vertices, vertexBufferSize);
+			vertexUploadHeap->Unmap(0, nullptr);
+
+			ThrowIfFailed(indexUploadHeap->Map(0, &readRange, reinterpret_cast<void**>(&pMapped)));
+			memcpy(pMapped, indices, indexBufferSize);
+			indexUploadHeap->Unmap(0, nullptr);
+
+			// 4. Record GPU copy commands: upload heap → default heap
+			m_commandList->CopyBufferRegion(m_vertexBuffer.Get(), 0, vertexUploadHeap.Get(), 0, vertexBufferSize);
+			m_commandList->CopyBufferRegion(m_indexBuffer.Get(), 0, indexUploadHeap.Get(), 0, indexBufferSize);
+
+			// 5. Transition to read states
+			const D3D12_RESOURCE_BARRIER barriers[] =
 			{
-				D3D12_SUBRESOURCE_DATA subresource = {};
-				subresource.pData = images[i].pixels;
-				subresource.RowPitch = static_cast<LONG_PTR>(images[i].rowPitch);
-				subresource.SlicePitch = static_cast<LONG_PTR>(images[i].slicePitch);
-				subresources.push_back(subresource);
+				CD3DX12_RESOURCE_BARRIER::Transition(
+					m_vertexBuffer.Get(),
+					D3D12_RESOURCE_STATE_COPY_DEST,
+					D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER),
+				CD3DX12_RESOURCE_BARRIER::Transition(
+					m_indexBuffer.Get(),
+					D3D12_RESOURCE_STATE_COPY_DEST,
+					D3D12_RESOURCE_STATE_INDEX_BUFFER)
+			};
+			m_commandList->ResourceBarrier(_countof(barriers), barriers);
+
+			// 6. Initialize buffer views (same as before)
+			m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
+			m_vertexBufferView.StrideInBytes = sizeof(Vertex);
+			m_vertexBufferView.SizeInBytes = vertexBufferSize;
+
+			m_indexBufferView.BufferLocation = m_indexBuffer->GetGPUVirtualAddress();
+			m_indexBufferView.Format = DXGI_FORMAT_R16_UINT;
+			m_indexBufferView.SizeInBytes = indexBufferSize;
+		}
+
+		CD3DX12_CPU_DESCRIPTOR_HANDLE handle(m_heap->GetCPUDescriptorHandleForHeapStart());
+
+		// Create the textures and SRVs
+		{
+			auto LoadTextureAndCreateSrv = [&](const std::wstring& path,
+				ComPtr<ID3D12Resource>& texture,
+				ComPtr<ID3D12Resource>& uploadHeap)
+				{
+					TexMetadata metadata = {};
+					ScratchImage scratchImage;
+
+					ThrowIfFailed(LoadFromWICFile(
+						path.c_str(),
+						WIC_FLAGS_FORCE_RGB,
+						&metadata,
+						scratchImage
+					));
+
+					D3D12_RESOURCE_DESC textureDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+						metadata.format,
+						static_cast<UINT64>(metadata.width),
+						static_cast<UINT>(metadata.height),
+						static_cast<UINT16>(metadata.arraySize),
+						static_cast<UINT16>(metadata.mipLevels)
+					);
+
+					ThrowIfFailed(m_device->CreateCommittedResource(
+						&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+						D3D12_HEAP_FLAG_NONE,
+						&textureDesc,
+						D3D12_RESOURCE_STATE_COPY_DEST,
+						nullptr,
+						IID_PPV_ARGS(&texture)
+					));
+
+					const UINT subresourceCount = static_cast<UINT>(scratchImage.GetImageCount());
+					const UINT64 uploadBufferSize = GetRequiredIntermediateSize(texture.Get(), 0, subresourceCount);
+
+					ThrowIfFailed(m_device->CreateCommittedResource(
+						&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+						D3D12_HEAP_FLAG_NONE,
+						&CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize),
+						D3D12_RESOURCE_STATE_GENERIC_READ,
+						nullptr,
+						IID_PPV_ARGS(&uploadHeap)
+					));
+
+					std::vector<D3D12_SUBRESOURCE_DATA> subresources;
+					subresources.reserve(subresourceCount);
+					const Image* images = scratchImage.GetImages();
+					for (UINT i = 0; i < subresourceCount; ++i)
+					{
+						D3D12_SUBRESOURCE_DATA subresource = {};
+						subresource.pData = images[i].pixels;
+						subresource.RowPitch = static_cast<LONG_PTR>(images[i].rowPitch);
+						subresource.SlicePitch = static_cast<LONG_PTR>(images[i].slicePitch);
+						subresources.push_back(subresource);
+					}
+
+					UpdateSubresources(m_commandList.Get(), texture.Get(), uploadHeap.Get(), 0, 0, subresourceCount, subresources.data());
+
+					// No barrier here — batched below after both textures are uploaded
+
+					D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+					srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+					srvDesc.Format = metadata.format;
+					srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+					srvDesc.Texture2D.MostDetailedMip = 0;
+					srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
+					srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+
+					// Use captured handle directly — srvHandleOut was just a redundant copy of it
+					m_device->CreateShaderResourceView(texture.Get(), &srvDesc, handle);
+					handle.Offset(1, m_heapDescriptorSize);
+				};
+
+			const std::wstring diffusePath = GetAssetFullPath(L"Textures\\container.png");
+			const std::wstring specularPath = GetAssetFullPath(L"Textures\\container_specular.png");
+
+			LoadTextureAndCreateSrv(diffusePath, m_texture, textureUploadHeapDiffuse);
+			LoadTextureAndCreateSrv(specularPath, m_specularTexture, textureUploadHeapSpecular);
+
+			// Batch both COPY_DEST → PIXEL_SHADER_RESOURCE transitions in one call
+			// (same principle as batching vertex + index buffer barriers)
+			const D3D12_RESOURCE_BARRIER textureBarriers[] =
+			{
+				CD3DX12_RESOURCE_BARRIER::Transition(
+					m_texture.Get(),
+					D3D12_RESOURCE_STATE_COPY_DEST,
+					D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+				CD3DX12_RESOURCE_BARRIER::Transition(
+					m_specularTexture.Get(),
+					D3D12_RESOURCE_STATE_COPY_DEST,
+					D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+			};
+			m_commandList->ResourceBarrier(_countof(textureBarriers), textureBarriers);
+		}
+
+		// Create the constant buffer for all cubes (b0)
+		{
+			const UINT constantBufferSize = sizeof(SceneConstantBuffer);
+			const UINT totalConstantBufferSize = constantBufferSize * CubeCount;
+
+			ThrowIfFailed(m_device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&m_cubeConstantBuffer)
+			));
+
+			// Map and initialize the constant buffer. We don't unmap this until the
+			// app closes. Keeping things mapped for the lifetime of the resource is okay.
+			CD3DX12_RANGE readRange(0, 0);
+			ThrowIfFailed(m_cubeConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pCubeCbvDataBegin)));
+
+			for (UINT i = 0; i < CubeCount; ++i)
+			{
+				// Describe and create a constant buffer view.
+				D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+				cbvDesc.BufferLocation = m_cubeConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
+				cbvDesc.SizeInBytes = constantBufferSize;
+
+				m_device->CreateConstantBufferView(&cbvDesc, handle);
+				handle.Offset(1, m_heapDescriptorSize);
 			}
 
-			UpdateSubresources(m_commandList.Get(), texture.Get(), uploadHeap.Get(), 0, 0, subresourceCount, subresources.data());
-			m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
-
-			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			srvDesc.Format = metadata.format;
-			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-			srvDesc.Texture2D.MostDetailedMip = 0;
-			srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
-			srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
-
-			m_device->CreateShaderResourceView(texture.Get(), &srvDesc, srvHandleOut);
-			handle.Offset(1, m_heapDescriptorSize);
-		};
-
-	// 0: diffuse, 1: specular
-	const std::wstring diffusePath = GetAssetFullPath(L"Textures\\container.png");
-	const std::wstring specularPath = GetAssetFullPath(L"Textures\\container_specular.png");
-
-	// SRV for diffuse at heap slot 0
-	LoadTextureAndCreateSrv(diffusePath, m_texture, textureUploadHeapDiffuse, handle);
-
-	// SRV for specular at heap slot 1
-	LoadTextureAndCreateSrv(specularPath, m_specularTexture, textureUploadHeapSpecular, handle);
-
-	// Create the constant buffer for all cubes (b0)
-	{
-		const UINT constantBufferSize = sizeof(SceneConstantBuffer);
-		const UINT totalConstantBufferSize = constantBufferSize * CubeCount;
-
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&m_cubeConstantBuffer)
-		));
-
-		// Map and initialize the constant buffer. We don't unmap this until the
-		// app closes. Keeping things mapped for the lifetime of the resource is okay.
-		CD3DX12_RANGE readRange(0, 0);
-		ThrowIfFailed(m_cubeConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pCubeCbvDataBegin)));
-
-		for (UINT i = 0; i < CubeCount; ++i)
-		{
-			// Describe and create a constant buffer view.
-			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-			cbvDesc.BufferLocation = m_cubeConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
-			cbvDesc.SizeInBytes = constantBufferSize;
-
-			m_device->CreateConstantBufferView(&cbvDesc, handle);
-			handle.Offset(1, m_heapDescriptorSize);
+			memcpy(m_pCubeCbvDataBegin, &m_cubeConstantBufferData, sizeof(m_cubeConstantBufferData));
 		}
 
-		memcpy(m_pCubeCbvDataBegin, &m_cubeConstantBufferData, sizeof(m_cubeConstantBufferData));
-	}
-
-	// Create the constant buffer for light data used by cube shaders (b1)
-	{
-		const UINT constantBufferSize = sizeof(LightDataConstantBuffer);
-		const UINT totalConstantBufferSize = constantBufferSize * CubeCount; // ← was just constantBufferSize
-
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&m_lightDataConstantBuffer)
-		));
-
-		CD3DX12_RANGE readRange(0, 0);
-		ThrowIfFailed(m_lightDataConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightDataCbvDataBegin)));
-
-		for (UINT i = 0; i < CubeCount; ++i) // ← was a single CBV
+		// Create the constant buffer for light data used by cube shaders (b1)
 		{
-			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-			cbvDesc.BufferLocation = m_lightDataConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
-			cbvDesc.SizeInBytes = constantBufferSize;
-			m_device->CreateConstantBufferView(&cbvDesc, handle);
-			handle.Offset(1, m_heapDescriptorSize);
+			const UINT constantBufferSize = sizeof(LightDataConstantBuffer);
+			const UINT totalConstantBufferSize = constantBufferSize * CubeCount; // ← was just constantBufferSize
+
+			ThrowIfFailed(m_device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&m_lightDataConstantBuffer)
+			));
+
+			CD3DX12_RANGE readRange(0, 0);
+			ThrowIfFailed(m_lightDataConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightDataCbvDataBegin)));
+
+			for (UINT i = 0; i < CubeCount; ++i) // ← was a single CBV
+			{
+				D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+				cbvDesc.BufferLocation = m_lightDataConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
+				cbvDesc.SizeInBytes = constantBufferSize;
+				m_device->CreateConstantBufferView(&cbvDesc, handle);
+				handle.Offset(1, m_heapDescriptorSize);
+			}
+
+			memcpy(m_pLightDataCbvDataBegin, m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
 		}
 
-		memcpy(m_pLightDataCbvDataBegin, m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
-	}
-
-	// Create the constant buffer for light sources (b0 in light shaders)
-	{
-		const UINT constantBufferSize = sizeof(LightSourceConstantBuffer);
-		const UINT totalConstantBufferSize = constantBufferSize * LightSourceCount;
-
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&m_lightSourceConstantBuffer)
-		));
-
-		// Map and initialize the constant buffer. We don't unmap this until the
-		// app closes. Keeping things mapped for the lifetime of the resource is okay.
-		CD3DX12_RANGE readRange(0, 0);
-		ThrowIfFailed(m_lightSourceConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightSourceCbvDataBegin)));
-
-		for (UINT i = 0; i < LightSourceCount; ++i)
+		// Create the constant buffer for light sources (b0 in light shaders)
 		{
-			// Describe and create a constant buffer view.
-			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-			cbvDesc.BufferLocation = m_lightSourceConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
-			cbvDesc.SizeInBytes = constantBufferSize;
+			const UINT constantBufferSize = sizeof(LightSourceConstantBuffer);
+			const UINT totalConstantBufferSize = constantBufferSize * LightSourceCount;
 
-			m_device->CreateConstantBufferView(&cbvDesc, handle);
-			handle.Offset(1, m_heapDescriptorSize);
+			ThrowIfFailed(m_device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&m_lightSourceConstantBuffer)
+			));
+
+			// Map and initialize the constant buffer. We don't unmap this until the
+			// app closes. Keeping things mapped for the lifetime of the resource is okay.
+			CD3DX12_RANGE readRange(0, 0);
+			ThrowIfFailed(m_lightSourceConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightSourceCbvDataBegin)));
+
+			for (UINT i = 0; i < LightSourceCount; ++i)
+			{
+				// Describe and create a constant buffer view.
+				D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+				cbvDesc.BufferLocation = m_lightSourceConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
+				cbvDesc.SizeInBytes = constantBufferSize;
+
+				m_device->CreateConstantBufferView(&cbvDesc, handle);
+				handle.Offset(1, m_heapDescriptorSize);
+			}
+
+			memcpy(m_pLightSourceCbvDataBegin, &m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
 		}
 
-		memcpy(m_pLightSourceCbvDataBegin, &m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
-	}
-
-	// Create the constant buffer for light sources data (b1 in light shaders)
-	{
-		const UINT constantBufferSize = sizeof(LightSourceDataConstantBuffer);
-		const UINT totalConstantBufferSize = constantBufferSize * LightSourceCount;
-
-		ThrowIfFailed(m_device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
-			D3D12_RESOURCE_STATE_GENERIC_READ,
-			nullptr,
-			IID_PPV_ARGS(&m_lightSourceDataConstantBuffer)
-		));
-
-		// Map and initialize the constant buffer. We don't unmap this until the
-		// app closes. Keeping things mapped for the lifetime of the resource is okay.
-		CD3DX12_RANGE readRange(0, 0);
-		ThrowIfFailed(m_lightSourceDataConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightSourceDataCbvDataBegin)));
-
-		for (UINT i = 0; i < LightSourceCount; ++i)
+		// Create the constant buffer for light sources data (b1 in light shaders)
 		{
-			// Describe and create a constant buffer view.
-			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-			cbvDesc.BufferLocation = m_lightSourceDataConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
-			cbvDesc.SizeInBytes = constantBufferSize;
+			const UINT constantBufferSize = sizeof(LightSourceDataConstantBuffer);
+			const UINT totalConstantBufferSize = constantBufferSize * LightSourceCount;
 
-			m_device->CreateConstantBufferView(&cbvDesc, handle);
-			handle.Offset(1, m_heapDescriptorSize);
+			ThrowIfFailed(m_device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(totalConstantBufferSize),
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&m_lightSourceDataConstantBuffer)
+			));
+
+			// Map and initialize the constant buffer. We don't unmap this until the
+			// app closes. Keeping things mapped for the lifetime of the resource is okay.
+			CD3DX12_RANGE readRange(0, 0);
+			ThrowIfFailed(m_lightSourceDataConstantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pLightSourceDataCbvDataBegin)));
+
+			for (UINT i = 0; i < LightSourceCount; ++i)
+			{
+				// Describe and create a constant buffer view.
+				D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+				cbvDesc.BufferLocation = m_lightSourceDataConstantBuffer->GetGPUVirtualAddress() + (static_cast<UINT64>(i) * constantBufferSize);
+				cbvDesc.SizeInBytes = constantBufferSize;
+
+				m_device->CreateConstantBufferView(&cbvDesc, handle);
+				handle.Offset(1, m_heapDescriptorSize);
+			}
+
+			memcpy(m_pLightSourceDataCbvDataBegin, &m_lightSourceDataConstantBufferData, sizeof(m_lightSourceDataConstantBufferData));
 		}
 
-		memcpy(m_pLightSourceDataCbvDataBegin, &m_lightSourceDataConstantBufferData, sizeof(m_lightSourceDataConstantBufferData));
-	}
+		// Close the command list and execute it to begin the initial GPU setup.
+		ThrowIfFailed(m_commandList->Close());
+		ID3D12CommandList* ppCommandLists[] = { m_commandList.Get() };
+		m_commandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
 
-	// Close the command list and execute it to begin the initial GPU setup.
-	ThrowIfFailed(m_commandList->Close());
-	ID3D12CommandList* ppCommandLists[] = { m_commandList.Get() };
-	m_commandQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
-
-	// Create synchronization objects and wait until assets have been uploaded to the GPU.
-	{
-		ThrowIfFailed(m_device->CreateFence(m_fenceValues[m_frameIndex], D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
-		m_fenceValues[m_frameIndex]++;
-
-		// Create an event handle to use for frame synchronization
-		m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-		if (m_fenceEvent == nullptr)
+		// Create synchronization objects and wait until assets have been uploaded to the GPU.
 		{
-			ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
-		}
+			ThrowIfFailed(m_device->CreateFence(m_fenceValues[m_frameIndex], D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
+			m_fenceValues[m_frameIndex]++;
 
-		// Wait for the command list to execute; we are reusing the same command 
-		// list in our main loop but for now, we just want to wait for setup to 
-		// complete before continuing.
-		WaitForGpu();
+			// Create an event handle to use for frame synchronization
+			m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+			if (m_fenceEvent == nullptr)
+			{
+				ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
+			}
+
+			// Wait for the command list to execute; we are reusing the same command 
+			// list in our main loop but for now, we just want to wait for setup to 
+			// complete before continuing.
+			WaitForGpu();
+		}
 	}
 }
 

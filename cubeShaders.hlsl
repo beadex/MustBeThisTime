@@ -52,7 +52,7 @@ PSInput VSMain(VS_Input input)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float ambientStrength = 0.2f;
+    float ambientStrength = 0.1f;
     float4 ambient = ambientStrength * lightColor;
 
     // Diffuse
@@ -62,7 +62,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float4 diffuse = diff * lightColor;
 
     // Specular
-    float specularStrength = 1.0f;
+    float specularStrength = 0.5f;
     float3 viewDir = normalize(cameraPos - input.worldPos); // ← fix: use cameraPos
     float3 reflectDir = reflect(-lightDir, norm);
     float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 32);
