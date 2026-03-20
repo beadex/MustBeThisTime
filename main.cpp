@@ -55,7 +55,7 @@ public:
 private:
 	static const UINT FrameCount = 2;
 	static const UINT CubeCount = 10;
-	static const UINT LightSourceCount = 1;
+	static const UINT LightSourceCount = 4;
 
 	struct Vertex
 	{
@@ -73,14 +73,41 @@ private:
 	};
 	static_assert((sizeof(SceneConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
 
+	struct DirectionalLightGpu
+	{
+		XMFLOAT4 direction;
+		XMFLOAT4 ambient;
+		XMFLOAT4 diffuse;
+		XMFLOAT4 specular;
+	};
+
+	struct PointLightGpu
+	{
+		XMFLOAT4 position;
+		XMFLOAT4 attenuation;
+		XMFLOAT4 ambient;
+		XMFLOAT4 diffuse;
+		XMFLOAT4 specular;
+	};
+
+	struct SpotLightGpu
+	{
+		XMFLOAT4 position;
+		XMFLOAT4 direction;
+		XMFLOAT4 cutoffs;
+		XMFLOAT4 attenuation;
+		XMFLOAT4 ambient;
+		XMFLOAT4 diffuse;
+		XMFLOAT4 specular;
+	};
+
 	struct LightDataConstantBuffer
 	{
-		XMFLOAT3 lightPosition; // 12
-		float padding0;			// 4
-		XMFLOAT4 lightColor;    // 16
-		XMFLOAT4 clearColor;   // 16
-		XMFLOAT3 cameraPos;     // 12
-		float padding[49];      // 228 → total 256 bytes
+		DirectionalLightGpu directionalLight;
+		SpotLightGpu spotLight;
+		XMFLOAT4 viewPos;
+		UINT pointLightCount;
+		float padding[15];
 	};
 	static_assert((sizeof(LightDataConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
 
@@ -126,10 +153,12 @@ private:
 	D3D12_INDEX_BUFFER_VIEW m_indexBufferView;
 	ComPtr<ID3D12Resource> m_texture;          // diffuse
 	ComPtr<ID3D12Resource> m_specularTexture;  // specular
+	ComPtr<ID3D12Resource> m_pointLightBuffer;
 	ComPtr<ID3D12Resource> m_cubeConstantBuffer;
 	SceneConstantBuffer m_cubeConstantBufferData[CubeCount];
 	ComPtr<ID3D12Resource> m_lightDataConstantBuffer; // for cube shader b1
 	LightDataConstantBuffer m_lightDataConstantBufferData[CubeCount];
+	PointLightGpu m_pointLightBufferData[LightSourceCount];
 	ComPtr<ID3D12Resource> m_lightSourceConstantBuffer;
 	LightSourceConstantBuffer m_lightSourceConstantBufferData[LightSourceCount];
 	ComPtr<ID3D12Resource> m_lightSourceDataConstantBuffer;
@@ -137,6 +166,7 @@ private:
 	ComPtr<ID3D12Resource> m_depthBuffer;
 	UINT8* m_pCubeCbvDataBegin;
 	UINT8* m_pLightDataCbvDataBegin;
+	UINT8* m_pPointLightDataBegin;
 	UINT8* m_pLightSourceCbvDataBegin;
 	UINT8* m_pLightSourceDataCbvDataBegin;
 
@@ -166,7 +196,6 @@ private:
 
 	// Scene properties
 	XMVECTOR m_clearColor;
-	XMVECTOR m_lightColor;
 	bool m_showUi;
 
 	void LoadPipeline();
@@ -203,6 +232,7 @@ D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	m_frameIndex(0),
 	m_pCubeCbvDataBegin(nullptr),
 	m_pLightDataCbvDataBegin(nullptr),
+	m_pPointLightDataBegin(nullptr),
 	m_pLightSourceCbvDataBegin(nullptr),
 	m_pLightSourceDataCbvDataBegin(nullptr),
 	m_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)),
@@ -219,7 +249,6 @@ D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	m_pitch(0.0f),
 	m_mouseSensitivity(0.1f),
 	m_clearColor(XMVectorSet(0.1f, 0.1f, 0.1f, 1.0f)),
-	m_lightColor(XMVectorSet(1.0f, 0.0f, 0.0f, 1.0f)),
 	m_showUi(false)
 {
 }
@@ -235,19 +264,17 @@ void D3DAppImpl::LoadPipeline()
 	UINT dxgiFactoryFlags = 0;
 
 #if defined(_DEBUG)
-	// Enable the debug layer (requires the Graphics Tools "optional feature").
-	// NOTE: Enabling the debug layer after device creation will invalidate the active device
 	{
 		ComPtr<ID3D12Debug> debugController;
 		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
 		{
 			debugController->EnableDebugLayer();
-
-			// Enable additional debug layers.
 			dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
 		}
 	}
 #endif
+
+	const DXGI_SAMPLE_DESC sampleDesc = { 1, 0 };
 
 	ComPtr<IDXGIFactory4> factory;
 	ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&factory)));
@@ -275,14 +302,12 @@ void D3DAppImpl::LoadPipeline()
 		));
 	}
 
-	// Describe and create the command queue.
 	D3D12_COMMAND_QUEUE_DESC queueDesc = {};
 	queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
 	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
 	ThrowIfFailed(m_device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_commandQueue)));
 
-	// Describe and create the swap chain.
 	DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
 	swapChainDesc.BufferCount = FrameCount;
 	swapChainDesc.Width = m_width;
@@ -290,7 +315,7 @@ void D3DAppImpl::LoadPipeline()
 	swapChainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 	swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-	swapChainDesc.SampleDesc.Count = 1;
+	swapChainDesc.SampleDesc = sampleDesc;
 
 	ComPtr<IDXGISwapChain1> swapChain;
 	ThrowIfFailed(factory->CreateSwapChainForHwnd(
@@ -302,15 +327,12 @@ void D3DAppImpl::LoadPipeline()
 		&swapChain
 	));
 
-	// Don't need to support fullscreen transitions.
 	ThrowIfFailed(factory->MakeWindowAssociation(Win32Application::GetHwnd(), DXGI_MWA_NO_ALT_ENTER));
 
 	ThrowIfFailed(swapChain.As(&m_swapChain));
 	m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
 
-	// Create descriptor heaps.
 	{
-		// Describe and create a render target view (RTV) descriptor heap.
 		D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
 		rtvHeapDesc.NumDescriptors = FrameCount;
 		rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -319,11 +341,10 @@ void D3DAppImpl::LoadPipeline()
 
 		m_rtvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-		const UINT sceneDescriptorCount = 2 + (2 * CubeCount) + (2 * LightSourceCount);
+		const UINT sceneDescriptorCount = 3 + (2 * CubeCount) + (2 * LightSourceCount);
 
-		// Need only one heap for both SRV and CBV
 		D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-		heapDesc.NumDescriptors = sceneDescriptorCount + 1; // Reserve 1 descriptor for ImGui (which will be allocated at index 0)
+		heapDesc.NumDescriptors = sceneDescriptorCount + 1;
 		heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 		ThrowIfFailed(m_device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_heap)));
@@ -343,7 +364,7 @@ void D3DAppImpl::LoadPipeline()
 		depthDesc.DepthOrArraySize = 1;
 		depthDesc.MipLevels = 1;
 		depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
-		depthDesc.SampleDesc.Count = 1;
+		depthDesc.SampleDesc = sampleDesc;
 		depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
 		D3D12_CLEAR_VALUE depthClear = {};
@@ -364,11 +385,9 @@ void D3DAppImpl::LoadPipeline()
 		m_dsvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 	}
 
-	// Create frame resources.
 	{
 		CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart());
 
-		// Create a RTV for each frame.
 		for (UINT n = 0; n < FrameCount; n++)
 		{
 			ThrowIfFailed(m_swapChain->GetBuffer(n, IID_PPV_ARGS(&m_renderTargets[n])));
@@ -395,7 +414,7 @@ void D3DAppImpl::LoadAssets()
 		}
 
 		CD3DX12_DESCRIPTOR_RANGE1 ranges[3];
-		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
+		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
 		ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC); // per-object (b0)
 		ranges[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 1, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC); // light data (b1)
 
@@ -411,7 +430,6 @@ void D3DAppImpl::LoadAssets()
 		sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 		sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 		sampler.MipLODBias = 0;
-		sampler.MaxAnisotropy = 0;
 		sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
 		sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
 		sampler.MinLOD = 0.0f;
@@ -461,20 +479,20 @@ void D3DAppImpl::LoadAssets()
 		psoDesc.PS = CD3DX12_SHADER_BYTECODE(pPixelShaderData, pixelShaderDataLength);
 		psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
 		psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-
-		// Enable depth testing
-		psoDesc.DepthStencilState.DepthEnable = TRUE;  // ← Change this
-		psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-		psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-		psoDesc.DepthStencilState.StencilEnable = FALSE;
-
-		psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;  // ← Add this
-
+		psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+		psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 		psoDesc.SampleMask = UINT_MAX;
 		psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 		psoDesc.NumRenderTargets = 1;
 		psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 		psoDesc.SampleDesc.Count = 1;
+		psoDesc.SampleDesc.Quality = 0;
+
+		psoDesc.DepthStencilState.DepthEnable = TRUE;
+		psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+		psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		psoDesc.DepthStencilState.StencilEnable = FALSE;
+
 		ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_cubePipelineState)));
 
 		delete[] pVertexShaderData;
@@ -505,20 +523,20 @@ void D3DAppImpl::LoadAssets()
 		psoDesc.PS = CD3DX12_SHADER_BYTECODE(pPixelShaderData, pixelShaderDataLength);
 		psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
 		psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-
-		// Enable depth testing
-		psoDesc.DepthStencilState.DepthEnable = TRUE;  // ← Change this
-		psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-		psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-		psoDesc.DepthStencilState.StencilEnable = FALSE;
-
-		psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;  // ← Add this
-
+		psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+		psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 		psoDesc.SampleMask = UINT_MAX;
 		psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 		psoDesc.NumRenderTargets = 1;
 		psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 		psoDesc.SampleDesc.Count = 1;
+		psoDesc.SampleDesc.Quality = 0;
+
+		psoDesc.DepthStencilState.DepthEnable = TRUE;
+		psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+		psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		psoDesc.DepthStencilState.StencilEnable = FALSE;
+
 		ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_lightSourcePipelineState)));
 		delete[] pVertexShaderData;
 		delete[] pPixelShaderData;
@@ -538,41 +556,41 @@ void D3DAppImpl::LoadAssets()
 		// Create the vertex and index buffers.
 		{
 			Vertex vertices[] = {
-				// Front face (z = -1), normal (0, 0, -1)
-				  { {-1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f} },
-				  { {-1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f} },
-				  { { 1.0f,  1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 0.0f} },
-				  { { 1.0f, -1.0f, -1.0f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f} },
+				// Front face (z = -0.5), normal (0, 0, -1)
+				{ {-0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f} },
+				{ {-0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f} },
+				{ { 0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 0.0f} },
+				{ { 0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f} },
 
-				  // Back face (z = 1), normal (0, 0, 1)
-				  { { 1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f} },
-				  { { 1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} },
-				  { {-1.0f,  1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f} },
-				  { {-1.0f, -1.0f,  1.0f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f} },
+				// Back face (z = 0.5), normal (0, 0, 1)
+				{ { 0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f} },
+				{ { 0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} },
+				{ {-0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f} },
+				{ {-0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f} },
 
-				  // Left face (x = -1), normal (-1, 0, 0)
-				  { {-1.0f, -1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
-				  { {-1.0f,  1.0f,  1.0f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
-				  { {-1.0f,  1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
-				  { {-1.0f, -1.0f, -1.0f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
+				// Left face (x = -0.5), normal (-1, 0, 0)
+				{ {-0.5f, -0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
+				{ {-0.5f,  0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
+				{ {-0.5f,  0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
+				{ {-0.5f, -0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
 
-				  // Right face (x = 1), normal (1, 0, 0)
-				  { { 1.0f, -1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
-				  { { 1.0f,  1.0f, -1.0f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
-				  { { 1.0f,  1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
-				  { { 1.0f, -1.0f,  1.0f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
+				// Right face (x = 0.5), normal (1, 0, 0)
+				{ { 0.5f, -0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} },
+				{ { 0.5f,  0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} },
+				{ { 0.5f,  0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} },
+				{ { 0.5f, -0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} },
 
-				  // Top face (y = 1), normal (0, 1, 0)
-				  { {-1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 1.0f} },
-				  { {-1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f} },
-				  { { 1.0f,  1.0f,  1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 0.0f} },
-				  { { 1.0f,  1.0f, -1.0f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f} },
+				// Top face (y = 0.5), normal (0, 1, 0)
+				{ {-0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 1.0f} },
+				{ {-0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f} },
+				{ { 0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 0.0f} },
+				{ { 0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f} },
 
-				  // Bottom face (y = -1), normal (0, -1, 0)
-				  { {-1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 1.0f} },
-				  { {-1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f} },
-				  { { 1.0f, -1.0f, -1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 0.0f} },
-				  { { 1.0f, -1.0f,  1.0f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f} },
+				// Bottom face (y = -0.5), normal (0, -1, 0)
+				{ {-0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 1.0f} },
+				{ {-0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f} },
+				{ { 0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 0.0f} },
+				{ { 0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f} },
 			};
 
 			UINT16 indices[] =
@@ -770,6 +788,37 @@ void D3DAppImpl::LoadAssets()
 			m_commandList->ResourceBarrier(_countof(textureBarriers), textureBarriers);
 		}
 
+		// Create the point light structured buffer and SRV at t2
+		{
+			const UINT pointLightBufferSize = sizeof(PointLightGpu) * LightSourceCount;
+
+			ThrowIfFailed(m_device->CreateCommittedResource(
+				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+				D3D12_HEAP_FLAG_NONE,
+				&CD3DX12_RESOURCE_DESC::Buffer(pointLightBufferSize),
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr,
+				IID_PPV_ARGS(&m_pointLightBuffer)
+			));
+
+			CD3DX12_RANGE readRange(0, 0);
+			ThrowIfFailed(m_pointLightBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pPointLightDataBegin)));
+
+			ZeroMemory(m_pPointLightDataBegin, pointLightBufferSize);
+
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+			srvDesc.Buffer.FirstElement = 0;
+			srvDesc.Buffer.NumElements = LightSourceCount;
+			srvDesc.Buffer.StructureByteStride = sizeof(PointLightGpu);
+			srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+			m_device->CreateShaderResourceView(m_pointLightBuffer.Get(), &srvDesc, handle);
+			handle.Offset(1, m_heapDescriptorSize);
+		}
+
 		// Create the constant buffer for all cubes (b0)
 		{
 			const UINT constantBufferSize = sizeof(SceneConstantBuffer);
@@ -899,7 +948,7 @@ void D3DAppImpl::LoadAssets()
 		}
 
 		// At this point, the handle has been offset past all the descriptors we've created so far,
-		const UINT sceneDescriptorCount = 2 + (2 * CubeCount) + (2 * LightSourceCount);
+		const UINT sceneDescriptorCount = 3 + (2 * CubeCount) + (2 * LightSourceCount);
 
 		m_initInfo.Device = m_device.Get();
 		m_initInfo.CommandQueue = m_commandQueue.Get();
@@ -944,20 +993,31 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 	static const XMFLOAT3 cubePositions[CubeCount] =
 	{
 		{ 0.0f,  0.0f,  0.0f },
-		{ 4.0f,  10.0f, -30.0f },
-		{ -3.0f, -4.4f, -5.0f },
-		{ -10.8f, -4.0f, -24.6f },
-		{ 4.8f, -0.16f, -7.0f },
-		{ -3.4f,  6.0f, -15.0f },
-		{ 2.6f, -4.0f, -5.0f },
-		{ 3.5f,  4.0f, -5.5f },
-		{ 4.5f,  0.5f, -3.5f },
-		{ -2.6f,  2.0f, -3.0f }
+		{ 2.0f,  5.0f, -15.0f },
+		{ -1.5f, -2.2f, -2.5f },
+		{ -3.8f, -2.0f, -12.3f },
+		{ 2.4f, -0.4f, -3.5f },
+		{ -1.7f,  3.0f, -7.5f },
+		{ 1.3f, -2.0f, -2.5f },
+		{ 1.5f,  2.0f, -2.5f },
+		{ 1.5f,  0.2f, -1.5f },
+		{ -1.3f,  1.0f, -1.5f }
 	};
 
-	static const XMFLOAT3 lightSourcePositions[LightSourceCount] =
+	static const XMFLOAT3 pointLightPositions[LightSourceCount] =
 	{
-		{ 1.2f, 1.0f, -6.0f },
+		{  0.7f,  0.2f,  2.0f },
+		{  2.3f, -3.3f, -4.0f },
+		{ -4.0f,  2.0f, -12.0f },
+		{  0.0f,  0.0f, -3.0f }
+	};
+
+	static const XMFLOAT4 pointLightColors[LightSourceCount] =
+	{
+		XMFLOAT4(1.0f, 0.2f, 0.2f, 1.0f), // red
+		XMFLOAT4(0.2f, 1.0f, 0.2f, 1.0f), // green
+		XMFLOAT4(0.2f, 0.4f, 1.0f, 1.0f), // blue
+		XMFLOAT4(1.0f, 0.9f, 0.3f, 1.0f)  // yellow
 	};
 
 	const float deltaTime = timer.DeltaTime();
@@ -999,53 +1059,96 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 
 	XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV4, m_aspectRatio, 0.1f, 100.0f);
 
+	// Fill the structured buffer for point lights.
+	for (UINT i = 0; i < LightSourceCount; ++i)
+	{
+		const XMFLOAT4& color = pointLightColors[i];
+
+		m_pointLightBufferData[i].position = XMFLOAT4(
+			pointLightPositions[i].x,
+			pointLightPositions[i].y,
+			pointLightPositions[i].z,
+			1.0f);
+
+		m_pointLightBufferData[i].attenuation = XMFLOAT4(1.0f, 0.09f, 0.032f, 0.0f);
+		m_pointLightBufferData[i].ambient = XMFLOAT4(color.x * 0.2f, color.y * 0.2f, color.z * 0.2f, 1.0f);
+		m_pointLightBufferData[i].diffuse = XMFLOAT4(color.x * 0.5f, color.y * 0.5f, color.z * 0.5f, 1.0f);
+		m_pointLightBufferData[i].specular = color;
+	}
+
 	for (UINT i = 0; i < CubeCount; ++i)
 	{
-		XMMATRIX mRotate = XMMatrixRotationAxis(XMVectorSet(1.0f, 0.3f, 0.5f, 1.0f), XMConvertToRadians(20.0f * i));
+		const XMMATRIX rotate = XMMatrixRotationAxis(
+			XMVectorSet(1.0f, 0.3f, 0.5f, 0.0f),
+			XMConvertToRadians(20.0f * i));
 
-		XMMATRIX mTranslate = XMMatrixTranslation(
+		const XMMATRIX translate = XMMatrixTranslation(
 			cubePositions[i].x,
 			cubePositions[i].y,
-			cubePositions[i].z
-		);
+			cubePositions[i].z);
 
-		XMMATRIX world = mRotate * mTranslate;
+		const XMMATRIX world = rotate * translate;
+		const XMMATRIX normalMatrix = XMMatrixTranspose(XMMatrixInverse(nullptr, world));
 
 		XMStoreFloat4x4(&m_cubeConstantBufferData[i].projection, XMMatrixTranspose(proj));
 		XMStoreFloat4x4(&m_cubeConstantBufferData[i].view, XMMatrixTranspose(view));
 		XMStoreFloat4x4(&m_cubeConstantBufferData[i].model, XMMatrixTranspose(world));
+		XMStoreFloat4x4(&m_cubeConstantBufferData[i].normalMatrix, normalMatrix);
 
-		// Store the normal matrix (ensure your struct has a float4x4 normalMatrix field)
-		XMMATRIX worldInverse = XMMatrixInverse(nullptr, world);
-		XMStoreFloat4x4(&m_cubeConstantBufferData[i].normalMatrix, worldInverse);
+		XMStoreFloat4(&m_lightDataConstantBufferData[i].viewPos, m_cameraPos);
 
-		XMVECTOR lightPosWorld = XMLoadFloat3(&lightSourcePositions[0]);
-		XMStoreFloat3(&m_lightDataConstantBufferData[i].lightPosition, lightPosWorld);
-		XMStoreFloat4(&m_lightDataConstantBufferData[i].lightColor, m_lightColor);
-		XMStoreFloat4(&m_lightDataConstantBufferData[i].clearColor, m_clearColor);
-		XMStoreFloat3(&m_lightDataConstantBufferData[i].cameraPos, m_cameraPos);
+		m_lightDataConstantBufferData[i].directionalLight.direction = XMFLOAT4(-0.2f, -1.0f, -0.3f, 1.0f);
+		m_lightDataConstantBufferData[i].directionalLight.ambient = XMFLOAT4(
+			XMVectorGetX(m_clearColor),
+			XMVectorGetY(m_clearColor),
+			XMVectorGetZ(m_clearColor),
+			1.0f);
+		m_lightDataConstantBufferData[i].directionalLight.diffuse = XMFLOAT4(
+			XMVectorGetX(m_clearColor) * 0.4f,
+			XMVectorGetY(m_clearColor) * 0.4f,
+			XMVectorGetZ(m_clearColor) * 0.4f,
+			1.0f);
+		m_lightDataConstantBufferData[i].directionalLight.specular = XMFLOAT4(
+			XMVectorGetX(m_clearColor) * 0.5f,
+			XMVectorGetY(m_clearColor) * 0.5f,
+			XMVectorGetZ(m_clearColor) * 0.5f,
+			1.0f);
+
+		XMStoreFloat4(&m_lightDataConstantBufferData[i].spotLight.position, m_cameraPos);
+		XMStoreFloat4(&m_lightDataConstantBufferData[i].spotLight.direction, m_cameraFront);
+		m_lightDataConstantBufferData[i].spotLight.cutoffs = XMFLOAT4(
+			cosf(XMConvertToRadians(12.5f)),
+			cosf(XMConvertToRadians(17.5f)),
+			0.0f,
+			0.0f);
+		m_lightDataConstantBufferData[i].spotLight.attenuation = XMFLOAT4(1.0f, 0.09f, 0.032f, 0.0f);
+		m_lightDataConstantBufferData[i].spotLight.ambient = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
+		m_lightDataConstantBufferData[i].spotLight.diffuse = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+		m_lightDataConstantBufferData[i].spotLight.specular = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+
+		m_lightDataConstantBufferData[i].pointLightCount = LightSourceCount;
 	}
 
 	for (UINT i = 0; i < LightSourceCount; ++i)
 	{
-		XMMATRIX mTranslate = XMMatrixTranslation(
-			lightSourcePositions[i].x,
-			lightSourcePositions[i].y,
-			lightSourcePositions[i].z
-		);
+		const XMMATRIX translate = XMMatrixTranslation(
+			pointLightPositions[i].x,
+			pointLightPositions[i].y,
+			pointLightPositions[i].z);
 
-		XMMATRIX mScale = XMMatrixScaling(0.3f, 0.3f, 0.3f);
-
-		XMMATRIX world = mScale * mTranslate;
+		const XMMATRIX scale = XMMatrixScaling(0.2f, 0.2f, 0.2f);
+		const XMMATRIX world = scale * translate;
 
 		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].projection, XMMatrixTranspose(proj));
 		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].view, XMMatrixTranspose(view));
 		XMStoreFloat4x4(&m_lightSourceConstantBufferData[i].model, XMMatrixTranspose(world));
-		XMStoreFloat4(&m_lightSourceDataConstantBufferData[i].lightColor, m_lightColor);
+
+		m_lightSourceDataConstantBufferData[i].lightColor = pointLightColors[i];
 	}
 
 	memcpy(m_pCubeCbvDataBegin, m_cubeConstantBufferData, sizeof(m_cubeConstantBufferData));
-	memcpy(m_pLightDataCbvDataBegin, &m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
+	memcpy(m_pLightDataCbvDataBegin, m_lightDataConstantBufferData, sizeof(m_lightDataConstantBufferData));
+	memcpy(m_pPointLightDataBegin, m_pointLightBufferData, sizeof(m_pointLightBufferData));
 	memcpy(m_pLightSourceCbvDataBegin, m_lightSourceConstantBufferData, sizeof(m_lightSourceConstantBufferData));
 	memcpy(m_pLightSourceDataCbvDataBegin, m_lightSourceDataConstantBufferData, sizeof(m_lightSourceDataConstantBufferData));
 }
@@ -1071,18 +1174,6 @@ void D3DAppImpl::OnRender(const Timer& timer)
 		if (ImGui::ColorEdit3("Clear color", clearColor))
 		{
 			m_clearColor = XMVectorSet(clearColor[0], clearColor[1], clearColor[2], 1.0f);
-		}
-
-		float lightColor[3] =
-		{
-			XMVectorGetX(m_lightColor),
-			XMVectorGetY(m_lightColor),
-			XMVectorGetZ(m_lightColor)
-		};
-
-		if (ImGui::ColorEdit3("Light color", lightColor))
-		{
-			m_lightColor = XMVectorSet(lightColor[0], lightColor[1], lightColor[2], 1.0f);
 		}
 
 		ImGui::Text("Press Esc to close the menu.");
@@ -1212,23 +1303,15 @@ void D3DAppImpl::OnMouseRawDelta(int dx, int dy)
 
 void D3DAppImpl::PopulateCommandList()
 {
-	// Command list allocators can only be reset when the associated
-	// command lists have finished execution on the GPU; apps should use
-	// fences to determine GPU execution progress.
 	ThrowIfFailed(m_commandAllocators[m_frameIndex]->Reset());
-
-	// However, when ExecuteCommandList() is called on a particular command 
-	// list, that command list can then be reset at any time and must be before 
-	// re-recording.
 	ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), m_cubePipelineState.Get()));
 
-	// Set necessary state
 	m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
 
 	ID3D12DescriptorHeap* ppHeaps[] = { m_heap.Get() };
 	m_commandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 
-	auto gpuStart = m_heap->GetGPUDescriptorHandleForHeapStart();
+	const D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = m_heap->GetGPUDescriptorHandleForHeapStart();
 
 	CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(gpuStart, 0, m_heapDescriptorSize);
 	m_commandList->SetGraphicsRootDescriptorTable(0, srvHandle);
@@ -1236,62 +1319,59 @@ void D3DAppImpl::PopulateCommandList()
 	m_commandList->RSSetViewports(1, &m_viewport);
 	m_commandList->RSSetScissorRects(1, &m_scissorRect);
 
-	// Indicate that the back buffer will be used as a render target.
-	m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[m_frameIndex].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+		m_renderTargets[m_frameIndex].Get(),
+		D3D12_RESOURCE_STATE_PRESENT,
+		D3D12_RESOURCE_STATE_RENDER_TARGET));
 
-	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart(), m_frameIndex, m_rtvDescriptorSize);
+	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(
+		m_rtvHeap->GetCPUDescriptorHandleForHeapStart(),
+		m_frameIndex,
+		m_rtvDescriptorSize);
+
 	CD3DX12_CPU_DESCRIPTOR_HANDLE dsvHandle(m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
 
-	// Set render targets with DSV (do this once!)
 	m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
-	// Clear render target view
 #if defined(_XM_SSE_INTRINSICS_) || defined(_XM_SSE2_INTRINSICS_)
-	// x86/x64 with SSE
 	m_commandList->ClearRenderTargetView(rtvHandle, m_clearColor.m128_f32, 0, nullptr);
 #elif defined(_XM_ARM_NEON_INTRINSICS_) || defined(_XM_ARM64_NEON_INTRINSICS_)
-	// ARM / ARM64 with NEON
 	m_commandList->ClearRenderTargetView(rtvHandle, m_clearColor.n128_f32, 0, nullptr);
 #else
-	// Fallback: copy to a float[4]
 	XMFLOAT4 color;
 	XMStoreFloat4(&color, m_clearColor);
 	const float clearColor[4] = { color.x, color.y, color.z, color.w };
 	m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
 #endif
 
-	// Clear depth stencil view
 	m_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
 	m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
 	m_commandList->IASetIndexBuffer(&m_indexBufferView);
 
-	// Draw normal cubes
 	m_commandList->SetPipelineState(m_cubePipelineState.Get());
 	for (UINT i = 0; i < CubeCount; ++i)
 	{
-		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 2 + i, m_heapDescriptorSize);
+		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 3 + i, m_heapDescriptorSize);
 		m_commandList->SetGraphicsRootDescriptorTable(1, cbvHandle);
 
-		// Light data CBVs start at index 2 + CubeCount
-		CD3DX12_GPU_DESCRIPTOR_HANDLE lightDataHandle(gpuStart, 2 + CubeCount + i, m_heapDescriptorSize);
+		CD3DX12_GPU_DESCRIPTOR_HANDLE lightDataHandle(gpuStart, 3 + CubeCount + i, m_heapDescriptorSize);
 		m_commandList->SetGraphicsRootDescriptorTable(2, lightDataHandle);
 
 		m_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 	}
 
-	// Draw light cubes – standalone, using lightSourceShaders
 	m_commandList->SetPipelineState(m_lightSourcePipelineState.Get());
-
-	// Light CBVs start at index 2 + CubeCount
 	for (UINT i = 0; i < LightSourceCount; ++i)
 	{
-		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 2 + (2 * CubeCount) + i, m_heapDescriptorSize);
+		CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(gpuStart, 3 + (2 * CubeCount) + i, m_heapDescriptorSize);
 		m_commandList->SetGraphicsRootDescriptorTable(1, cbvHandle);
 
-		// Light data CBVs start at index 2 + CubeCount + LightSourceCount
-		CD3DX12_GPU_DESCRIPTOR_HANDLE lightDataHandle(gpuStart, 2 + (2 * CubeCount) + LightSourceCount + i, m_heapDescriptorSize);
+		CD3DX12_GPU_DESCRIPTOR_HANDLE lightDataHandle(
+			gpuStart,
+			3 + (2 * CubeCount) + LightSourceCount + i,
+			m_heapDescriptorSize);
 		m_commandList->SetGraphicsRootDescriptorTable(2, lightDataHandle);
 
 		m_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
@@ -1302,8 +1382,10 @@ void D3DAppImpl::PopulateCommandList()
 		ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), m_commandList.Get());
 	}
 
-	// Indicate that the back buffer will now be used to present.
-	m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[m_frameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
+	m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+		m_renderTargets[m_frameIndex].Get(),
+		D3D12_RESOURCE_STATE_RENDER_TARGET,
+		D3D12_RESOURCE_STATE_PRESENT));
 
 	ThrowIfFailed(m_commandList->Close());
 }

@@ -6,15 +6,40 @@ cbuffer SceneConstantBuffer : register(b0)
     float4x4 normalMatrix;
 };
 
-// New: light data
-cbuffer LightConstantBuffer : register(b1)
+struct DirectionalLight
 {
-    float3 lightPosition;
-    float padding0;
-    float4 lightColor;
-    float4 clearColor;
-    float3 cameraPos;
-    float padding1;
+    float4 direction;
+    float4 ambient;
+    float4 diffuse;
+    float4 specular;
+};
+
+struct PointLight
+{
+    float4 position; // xyz = position
+    float4 attenuation; // x = constant, y = linear, z = quadratic
+    float4 ambient;
+    float4 diffuse;
+    float4 specular;
+};
+
+struct SpotLight
+{
+    float4 position;
+    float4 direction;
+    float4 cutoffs; // x = inner cutoff cosine, y = outer cutoff cosine
+    float4 attenuation; // x = constant, y = linear, z = quadratic
+    float4 ambient;
+    float4 diffuse;
+    float4 specular;
+};
+
+cbuffer LightingConstants : register(b1)
+{
+    DirectionalLight directionalLight;
+    SpotLight spotLight;
+    float4 viewPos;
+    uint pointLightCount;
 };
 
 struct VS_Input
@@ -28,23 +53,27 @@ struct PSInput
 {
     float4 position : SV_POSITION;
     float3 normal : NORMAL;
-    float3 worldPos : POSITION; // new
+    float3 worldPos : POSITION;
     float2 uv : TEXCOORD;
 };
 
 Texture2D g_diffuseMap : register(t0);
 Texture2D g_specularMap : register(t1);
+StructuredBuffer<PointLight> g_pointLights : register(t2);
 SamplerState g_sampler : register(s0);
+
+float3 CalcDirLight(DirectionalLight light, float3 normal, float3 viewDir, float2 uv);
+float3 CalcPointLight(PointLight light, float3 normal, float3 fragPos, float3 viewDir, float2 uv);
+float3 CalcSpotLight(SpotLight light, float3 normal, float3 fragPos, float3 viewDir, float2 uv);
 
 PSInput VSMain(VS_Input input)
 {
     PSInput result;
-    float4 worldPos = mul(float4(input.position, 1.0), model);
+
+    float4 worldPos = mul(float4(input.position, 1.0f), model);
     result.worldPos = worldPos.xyz;
 
-    // Use the 3x3 part of the matrix for the normal
     result.normal = normalize(mul(input.normal, (float3x3) normalMatrix));
-    
     result.position = mul(mul(worldPos, view), projection);
     result.uv = input.uv;
 
@@ -54,32 +83,95 @@ PSInput VSMain(VS_Input input)
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float3 norm = normalize(input.normal);
-    float3 lightDir = normalize(lightPosition - input.worldPos);
-    float3 viewDir = normalize(cameraPos - input.worldPos);
-    float3 reflectDir = reflect(-lightDir, norm);
+    float3 viewDir = normalize(viewPos.xyz - input.worldPos);
 
-    float4 diffuseMapColor = g_diffuseMap.Sample(g_sampler, input.uv);
-    float4 specularMapColor = g_specularMap.Sample(g_sampler, input.uv);
+    float3 result = CalcDirLight(directionalLight, norm, viewDir, input.uv);
 
-    float diff = max(dot(norm, lightDir), 0.0f);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 32.0f);
+    [loop]
+    for (uint i = 0; i < pointLightCount; ++i)
+    {
+        result += CalcPointLight(g_pointLights[i], norm, input.worldPos, viewDir, input.uv);
+    }
 
-    float ambientStrength = 0.8f;
-    float specularStrength = 1.6f;
-    float clearSpecularInfluence = 2.0f;
+    result += CalcSpotLight(spotLight, norm, input.worldPos, viewDir, input.uv);
 
-    // Ambient = pure light + clear
-    float3 ambientTint = saturate(lightColor.rgb + clearColor.rgb);
-    float3 ambient = ambientStrength * ambientTint * diffuseMapColor.rgb;
+    return float4(result, 1.0f);
+}
 
-    // Diffuse = only light color
-    float3 diffuse = diff * lightColor.rgb * diffuseMapColor.rgb;
+float3 CalcDirLight(DirectionalLight light, float3 normal, float3 viewDir, float2 uv)
+{
+    float3 albedo = g_diffuseMap.Sample(g_sampler, uv).rgb;
+    float3 specMap = g_specularMap.Sample(g_sampler, uv).rgb;
 
-    // Specular = more influenced by clearColor than lightColor
-    float fresnel = pow(1.0f - saturate(dot(viewDir, norm)), 5.0f);
-    float3 specularTint = saturate(lightColor.rgb + (clearSpecularInfluence * clearColor.rgb));
-    float3 specular = specularStrength * spec * (0.25f + 0.75f * fresnel) * specularTint * specularMapColor.rgb;
+    float3 lightDir = normalize(-light.direction.xyz);
+    float diff = max(dot(normal, lightDir), 0.0f);
 
-    float3 finalColor = ambient + diffuse + specular;
-    return float4(saturate(finalColor), diffuseMapColor.a);
+    float3 reflectDir = reflect(-lightDir, normal);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 64.0f);
+
+    float3 ambient = light.ambient.rgb * albedo;
+    float3 diffuse = light.diffuse.rgb * diff * albedo;
+    float3 specular = light.specular.rgb * spec * specMap;
+
+    return ambient + diffuse + specular;
+}
+
+float3 CalcPointLight(PointLight light, float3 normal, float3 fragPos, float3 viewDir, float2 uv)
+{
+    float3 albedo = g_diffuseMap.Sample(g_sampler, uv).rgb;
+    float3 specMap = g_specularMap.Sample(g_sampler, uv).rgb;
+
+    float3 lightDir = normalize(light.position.xyz - fragPos);
+    float diff = max(dot(normal, lightDir), 0.0f);
+
+    float3 reflectDir = reflect(-lightDir, normal);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 64.0f);
+
+    float distanceToLight = length(light.position.xyz - fragPos);
+    float attenuation =
+        1.0f / (light.attenuation.x +
+                light.attenuation.y * distanceToLight +
+                light.attenuation.z * distanceToLight * distanceToLight);
+
+    float3 ambient = light.ambient.rgb * albedo;
+    float3 diffuse = light.diffuse.rgb * diff * albedo;
+    float3 specular = light.specular.rgb * spec * specMap;
+
+    ambient *= attenuation;
+    diffuse *= attenuation;
+    specular *= attenuation;
+
+    return ambient + diffuse + specular;
+}
+
+float3 CalcSpotLight(SpotLight light, float3 normal, float3 fragPos, float3 viewDir, float2 uv)
+{
+    float3 albedo = g_diffuseMap.Sample(g_sampler, uv).rgb;
+    float3 specMap = g_specularMap.Sample(g_sampler, uv).rgb;
+
+    float3 lightDir = normalize(light.position.xyz - fragPos);
+    float diff = max(dot(normal, lightDir), 0.0f);
+
+    float3 reflectDir = reflect(-lightDir, normal);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 64.0f);
+
+    float distanceToLight = length(light.position.xyz - fragPos);
+    float attenuation =
+        1.0f / (light.attenuation.x +
+                light.attenuation.y * distanceToLight +
+                light.attenuation.z * distanceToLight * distanceToLight);
+
+    float theta = dot(lightDir, normalize(-light.direction.xyz));
+    float epsilon = light.cutoffs.x - light.cutoffs.y;
+    float intensity = saturate((theta - light.cutoffs.y) / epsilon);
+
+    float3 ambient = light.ambient.rgb * albedo;
+    float3 diffuse = light.diffuse.rgb * diff * albedo;
+    float3 specular = light.specular.rgb * spec * specMap;
+
+    ambient *= attenuation * intensity;
+    diffuse *= attenuation * intensity;
+    specular *= attenuation * intensity;
+
+    return ambient + diffuse + specular;
 }
