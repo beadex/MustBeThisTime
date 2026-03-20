@@ -1246,7 +1246,19 @@ void D3DAppImpl::PopulateCommandList()
 	m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
 	// Clear render target view
+#if defined(_XM_SSE_INTRINSICS_) || defined(_XM_SSE2_INTRINSICS_)
+	// x86/x64 with SSE
 	m_commandList->ClearRenderTargetView(rtvHandle, m_clearColor.m128_f32, 0, nullptr);
+#elif defined(_XM_ARM_NEON_INTRINSICS_) || defined(_XM_ARM64_NEON_INTRINSICS_)
+	// ARM / ARM64 with NEON
+	m_commandList->ClearRenderTargetView(rtvHandle, m_clearColor.n128_f32, 0, nullptr);
+#else
+	// Fallback: copy to a float[4]
+	XMFLOAT4 color;
+	XMStoreFloat4(&color, m_clearColor);
+	const float clearColor[4] = { color.x, color.y, color.z, color.w };
+	m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+#endif
 
 	// Clear depth stencil view
 	m_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
