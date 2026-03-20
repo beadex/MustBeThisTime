@@ -12,9 +12,10 @@ cbuffer LightConstantBuffer : register(b1)
     float3 lightPosition;
     float padding0;
     float4 lightColor;
+    float4 clearColor;
     float3 cameraPos;
     float padding1;
-}
+};
 
 struct VS_Input
 {
@@ -52,26 +53,33 @@ PSInput VSMain(VS_Input input)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float ambientStrength = 0.1f;
-    float4 ambient = ambientStrength * lightColor;
-
-    // Diffuse
     float3 norm = normalize(input.normal);
     float3 lightDir = normalize(lightPosition - input.worldPos);
-    float diff = max(dot(norm, lightDir), 0.0f);
-    float4 diffuse = diff * lightColor;
-
-    // Specular
-    float specularStrength = 0.5f;
-    float3 viewDir = normalize(cameraPos - input.worldPos); // ← fix: use cameraPos
+    float3 viewDir = normalize(cameraPos - input.worldPos);
     float3 reflectDir = reflect(-lightDir, norm);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 32);
-    float4 specular = specularStrength * spec * lightColor; // ← fix: float3
-    
-    float4 diffuseMapColor = g_diffuseMap.Sample(g_sampler, input.uv).rgba;
-    float4 specularMapColor = g_specularMap.Sample(g_sampler, input.uv).rgba;
 
-    float4 result = ambient * diffuseMapColor + diffuse * diffuseMapColor + specular * specularMapColor;
+    float4 diffuseMapColor = g_diffuseMap.Sample(g_sampler, input.uv);
+    float4 specularMapColor = g_specularMap.Sample(g_sampler, input.uv);
 
-    return result;
+    float diff = max(dot(norm, lightDir), 0.0f);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 32.0f);
+
+    float ambientStrength = 0.8f;
+    float specularStrength = 1.6f;
+    float clearSpecularInfluence = 2.0f;
+
+    // Ambient = pure light + clear
+    float3 ambientTint = saturate(lightColor.rgb + clearColor.rgb);
+    float3 ambient = ambientStrength * ambientTint * diffuseMapColor.rgb;
+
+    // Diffuse = only light color
+    float3 diffuse = diff * lightColor.rgb * diffuseMapColor.rgb;
+
+    // Specular = more influenced by clearColor than lightColor
+    float fresnel = pow(1.0f - saturate(dot(viewDir, norm)), 5.0f);
+    float3 specularTint = saturate(lightColor.rgb + (clearSpecularInfluence * clearColor.rgb));
+    float3 specular = specularStrength * spec * (0.25f + 0.75f * fresnel) * specularTint * specularMapColor.rgb;
+
+    float3 finalColor = ambient + diffuse + specular;
+    return float4(saturate(finalColor), diffuseMapColor.a);
 }

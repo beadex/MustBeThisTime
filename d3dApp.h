@@ -15,6 +15,8 @@ public:
     virtual void OnRender(const Timer& timer) = 0;
     virtual void OnDestroy() = 0;
 
+    virtual bool IsMenuVisible() const { return false; }
+
 	// Keyboard input handlers.
     virtual void OnKeyDown(UINT8 /*key*/) {}
     virtual void OnKeyUp(UINT8 /*key*/) {}
@@ -26,6 +28,8 @@ public:
     UINT GetWidth() const { return m_width; }
     UINT GetHeight() const { return m_height; }
     const WCHAR* GetTitle() const { return m_title.c_str(); }
+
+	ImGui_ImplDX12_InitInfo& GetImGuiInitInfo() { return m_initInfo; }
 
     void ParseCommandLineArgs(_In_reads_(argc) WCHAR* argv[], int argc);
 
@@ -46,6 +50,8 @@ protected:
 
     // Adapter info.
     bool m_useWarpDevice;
+
+    ImGui_ImplDX12_InitInfo m_initInfo;
 
 private:
     // Root assets path.

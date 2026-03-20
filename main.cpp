@@ -7,6 +7,34 @@ extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = u8".\\D3D12
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
 
+namespace
+{
+	void SetCursorCaptured(bool captured)
+	{
+		if (!captured)
+		{
+			ClipCursor(nullptr);
+			ShowCursor(TRUE);
+			return;
+		}
+
+		HWND hwnd = Win32Application::GetHwnd();
+
+		RECT clientRect = {};
+		GetClientRect(hwnd, &clientRect);
+
+		POINT topLeft = { clientRect.left, clientRect.top };
+		POINT bottomRight = { clientRect.right, clientRect.bottom };
+
+		ClientToScreen(hwnd, &topLeft);
+		ClientToScreen(hwnd, &bottomRight);
+
+		RECT clipRect = { topLeft.x, topLeft.y, bottomRight.x, bottomRight.y };
+		ClipCursor(&clipRect);
+		ShowCursor(FALSE);
+	}
+}
+
 class D3DAppImpl : public D3DApp
 {
 public:
@@ -16,6 +44,8 @@ public:
 	virtual void OnUpdate(const Timer& timer) override;
 	virtual void OnRender(const Timer& timer) override;
 	virtual void OnDestroy() override;
+
+	virtual bool IsMenuVisible() const override { return m_showUi; }
 
 	virtual void OnKeyDown(UINT8 /*key*/) override;
 	virtual void OnKeyUp(UINT8 /*key*/) override;
@@ -48,8 +78,9 @@ private:
 		XMFLOAT3 lightPosition; // 12
 		float padding0;			// 4
 		XMFLOAT4 lightColor;    // 16
+		XMFLOAT4 clearColor;   // 16
 		XMFLOAT3 cameraPos;     // 12
-		float padding[53];      // 228 → total 256 bytes
+		float padding[49];      // 228 → total 256 bytes
 	};
 	static_assert((sizeof(LightDataConstantBuffer) % 256) == 0, "Constant Buffer size must be 256-byte aligned");
 
@@ -134,7 +165,9 @@ private:
 	float m_mouseSensitivity;
 
 	// Scene properties
+	XMVECTOR m_clearColor;
 	XMVECTOR m_lightColor;
+	bool m_showUi;
 
 	void LoadPipeline();
 	void LoadAssets();
@@ -185,7 +218,9 @@ D3DAppImpl::D3DAppImpl(UINT width, UINT height, std::wstring name) :
 	m_yaw(-90.0f),
 	m_pitch(0.0f),
 	m_mouseSensitivity(0.1f),
-	m_lightColor(XMVectorSet(1.0f, 0.0f, 0.0f, 1.0f))
+	m_clearColor(XMVectorSet(0.1f, 0.1f, 0.1f, 1.0f)),
+	m_lightColor(XMVectorSet(1.0f, 0.0f, 0.0f, 1.0f)),
+	m_showUi(false)
 {
 }
 
@@ -284,9 +319,11 @@ void D3DAppImpl::LoadPipeline()
 
 		m_rtvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
+		const UINT sceneDescriptorCount = 2 + (2 * CubeCount) + (2 * LightSourceCount);
+
 		// Need only one heap for both SRV and CBV
 		D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-		heapDesc.NumDescriptors = 2 + (2 * CubeCount) + (2 * LightSourceCount);
+		heapDesc.NumDescriptors = sceneDescriptorCount + 1; // Reserve 1 descriptor for ImGui (which will be allocated at index 0)
 		heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 		ThrowIfFailed(m_device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_heap)));
@@ -861,6 +898,22 @@ void D3DAppImpl::LoadAssets()
 			memcpy(m_pLightSourceDataCbvDataBegin, &m_lightSourceDataConstantBufferData, sizeof(m_lightSourceDataConstantBufferData));
 		}
 
+		// At this point, the handle has been offset past all the descriptors we've created so far,
+		const UINT sceneDescriptorCount = 2 + (2 * CubeCount) + (2 * LightSourceCount);
+
+		m_initInfo.Device = m_device.Get();
+		m_initInfo.CommandQueue = m_commandQueue.Get();
+		m_initInfo.NumFramesInFlight = FrameCount;
+		m_initInfo.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+		m_initInfo.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+		m_initInfo.SrvDescriptorHeap = m_heap.Get();
+		m_initInfo.LegacySingleSrvCpuDescriptor = handle;
+		m_initInfo.LegacySingleSrvGpuDescriptor =
+			CD3DX12_GPU_DESCRIPTOR_HANDLE(
+				m_heap->GetGPUDescriptorHandleForHeapStart(),
+				sceneDescriptorCount,
+				m_heapDescriptorSize);
+
 		// Close the command list and execute it to begin the initial GPU setup.
 		ThrowIfFailed(m_commandList->Close());
 		ID3D12CommandList* ppCommandLists[] = { m_commandList.Get() };
@@ -969,6 +1022,7 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 		XMVECTOR lightPosWorld = XMLoadFloat3(&lightSourcePositions[0]);
 		XMStoreFloat3(&m_lightDataConstantBufferData[i].lightPosition, lightPosWorld);
 		XMStoreFloat4(&m_lightDataConstantBufferData[i].lightColor, m_lightColor);
+		XMStoreFloat4(&m_lightDataConstantBufferData[i].clearColor, m_clearColor);
 		XMStoreFloat3(&m_lightDataConstantBufferData[i].cameraPos, m_cameraPos);
 	}
 
@@ -998,6 +1052,50 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 
 void D3DAppImpl::OnRender(const Timer& timer)
 {
+	// Start the Dear ImGui frame
+	ImGui_ImplDX12_NewFrame();
+	ImGui_ImplWin32_NewFrame();
+	ImGui::NewFrame();
+
+	if (m_showUi)
+	{
+		ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+
+		float clearColor[3] =
+		{
+			XMVectorGetX(m_clearColor),
+			XMVectorGetY(m_clearColor),
+			XMVectorGetZ(m_clearColor)
+		};
+
+		if (ImGui::ColorEdit3("Clear color", clearColor))
+		{
+			m_clearColor = XMVectorSet(clearColor[0], clearColor[1], clearColor[2], 1.0f);
+		}
+
+		float lightColor[3] =
+		{
+			XMVectorGetX(m_lightColor),
+			XMVectorGetY(m_lightColor),
+			XMVectorGetZ(m_lightColor)
+		};
+
+		if (ImGui::ColorEdit3("Light color", lightColor))
+		{
+			m_lightColor = XMVectorSet(lightColor[0], lightColor[1], lightColor[2], 1.0f);
+		}
+
+		ImGui::Text("Press Esc to close the menu.");
+
+		if (ImGui::Button("Exit application"))
+		{
+			DestroyWindow(Win32Application::GetHwnd());
+		}
+
+		ImGui::End();
+	}
+
+	ImGui::Render();
 	// Record all the commands we need to render the scene into the command list.
 	PopulateCommandList();
 
@@ -1015,16 +1113,23 @@ void D3DAppImpl::OnDestroy()
 {
 	// Ensure that the GPU is no longer referencing resources that are about to be cleaned up by the desctuctor
 	WaitForGpu();
+
+	ImGui_ImplDX12_Shutdown();
+	ImGui_ImplWin32_Shutdown();
+	ImGui::DestroyContext();
+
 	CloseHandle(m_fenceEvent);
 }
 
 void D3DAppImpl::OnKeyDown(UINT8 key)
 {
+	if (m_showUi)
+	{
+		return;
+	}
+
 	switch (key)
 	{
-	case VK_ESCAPE:
-		DestroyWindow(Win32Application::GetHwnd());
-		break;
 	case 'W':
 		m_moveForward = true;
 		break;
@@ -1046,6 +1151,19 @@ void D3DAppImpl::OnKeyUp(UINT8 key)
 {
 	switch (key)
 	{
+	case VK_ESCAPE:
+		m_showUi = !m_showUi;
+
+		if (m_showUi)
+		{
+			m_moveForward = false;
+			m_moveBackward = false;
+			m_moveLeft = false;
+			m_moveRight = false;
+		}
+
+		SetCursorCaptured(!m_showUi);
+		break;
 	case 'W':
 		m_moveForward = false;
 		break;
@@ -1065,6 +1183,11 @@ void D3DAppImpl::OnKeyUp(UINT8 key)
 
 void D3DAppImpl::OnMouseRawDelta(int dx, int dy)
 {
+	if (m_showUi)
+	{
+		return;
+	}
+
 	m_yaw -= static_cast<float>(dx) * m_mouseSensitivity;
 	m_pitch -= static_cast<float>(dy) * m_mouseSensitivity;
 
@@ -1123,8 +1246,7 @@ void D3DAppImpl::PopulateCommandList()
 	m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
 	// Clear render target view
-	const float clearColor[] = { 0.05f, 0.05f, 0.05f, 1.0f };
-	m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+	m_commandList->ClearRenderTargetView(rtvHandle, m_clearColor.m128_f32, 0, nullptr);
 
 	// Clear depth stencil view
 	m_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
@@ -1161,6 +1283,11 @@ void D3DAppImpl::PopulateCommandList()
 		m_commandList->SetGraphicsRootDescriptorTable(2, lightDataHandle);
 
 		m_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+	}
+
+	if (ImGui::GetDrawData() != nullptr)
+	{
+		ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), m_commandList.Get());
 	}
 
 	// Indicate that the back buffer will now be used to present.

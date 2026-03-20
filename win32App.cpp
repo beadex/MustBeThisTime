@@ -32,6 +32,10 @@ Timer Win32Application::m_timer = Timer();
 bool Win32Application::m_appPaused = false;
 
 int Win32Application::Run(D3DApp* pApp, HINSTANCE hInstance, int nCmdShow) {
+	// Make process DPI aware and obtain main monitor scale
+	ImGui_ImplWin32_EnableDpiAwareness();
+	float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(::MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
+
 	int argc;
 
 	LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -48,7 +52,7 @@ int Win32Application::Run(D3DApp* pApp, HINSTANCE hInstance, int nCmdShow) {
 	windowClass.lpszClassName = L"DXSampleClass";
 	RegisterClassEx(&windowClass);
 
-	RECT windowRect = { 0, 0, static_cast<LONG>(pApp->GetWidth()), static_cast<LONG>(pApp->GetHeight()) };
+	RECT windowRect = { 0, 0, static_cast<LONG>(pApp->GetWidth() * main_scale), static_cast<LONG>(pApp->GetHeight() * main_scale) };
 	AdjustWindowRect(&windowRect, WS_OVERLAPPEDWINDOW, FALSE);
 
 	// Create the window and store a handle to it.
@@ -76,6 +80,29 @@ int Win32Application::Run(D3DApp* pApp, HINSTANCE hInstance, int nCmdShow) {
 	pApp->OnInit();
 
 	ShowWindow(m_hwnd, nCmdShow);
+
+	// Setup Dear ImGui context
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO(); (void)io;
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+
+	// Setup Dear ImGui style
+	ImGui::StyleColorsDark();
+	//ImGui::StyleColorsLight();
+
+	// Setup scaling
+	ImGuiStyle& style = ImGui::GetStyle();
+	style.ScaleAllSizes(main_scale);        // Bake a fixed style scale. (until we have a solution for dynamic style scaling, changing this requires resetting Style + calling this again)
+	style.FontScaleDpi = main_scale;        // Set initial font scale. (in docking branch: using io.ConfigDpiScaleFonts=true automatically overrides this for every window depending on the current monitor)
+
+	// Setup Platform/Renderer backends
+	ImGui_ImplWin32_Init(m_hwnd);
+
+	ImGui_ImplDX12_InitInfo init_info = pApp->GetImGuiInitInfo();
+	ImGui_ImplDX12_Init(&init_info);
+
 	SetForegroundWindow(m_hwnd);
 	SetFocus(m_hwnd);
 	LockCursorToClient(m_hwnd);
@@ -115,16 +142,21 @@ int Win32Application::Run(D3DApp* pApp, HINSTANCE hInstance, int nCmdShow) {
 	return static_cast<char>(msg.wParam);
 }
 
+// Forward declare message handler from imgui_impl_win32.cpp
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
 // Main message handler for the sample.
 LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+	if (ImGui::GetCurrentContext() != nullptr && ImGui_ImplWin32_WndProcHandler(hWnd, message, wParam, lParam))
+	{
+		return TRUE;
+	}
+
 	D3DApp* pApp = reinterpret_cast<D3DApp*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
 
 	switch (message)
 	{
-		// WM_ACTIVATE is sent when the window is activated or deactivated.  
-		// We pause the game when the window is deactivated and unpause it 
-		// when it becomes active.  
 	case WM_ACTIVATE:
 		if (LOWORD(wParam) == WA_INACTIVE)
 		{
@@ -140,7 +172,6 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 
 	case WM_CREATE:
 	{
-		// Save the D3DApp* passed in to CreateWindow.
 		LPCREATESTRUCT pCreateStruct = reinterpret_cast<LPCREATESTRUCT>(lParam);
 		SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pCreateStruct->lpCreateParams));
 	}
@@ -164,7 +195,7 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 		return 0;
 
 	case WM_INPUT:
-		if (pApp)
+		if (pApp && !pApp->IsMenuVisible())
 		{
 			UINT size = 0;
 			if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER)) == 0 && size > 0)
@@ -183,17 +214,21 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 		return 0;
 
 	case WM_SETCURSOR:
-		SetCursor(nullptr);
+		if (pApp && pApp->IsMenuVisible())
+		{
+			SetCursor(LoadCursor(nullptr, IDC_ARROW));
+		}
+		else
+		{
+			SetCursor(nullptr);
+		}
 		return TRUE;
 
-		// WM_EXITSIZEMOVE is sent when the user grabs the resize bars.
 	case WM_ENTERSIZEMOVE:
 		m_appPaused = true;
 		m_timer.Stop();
 		return 0;
 
-		// WM_EXITSIZEMOVE is sent when the user releases the resize bars.
-		// Here we reset everything based on the new window dimensions.
 	case WM_EXITSIZEMOVE:
 		m_appPaused = false;
 		m_timer.Start();
@@ -204,6 +239,5 @@ LRESULT CALLBACK Win32Application::WindowProc(HWND hWnd, UINT message, WPARAM wP
 		return 0;
 	}
 
-	// Handle any messages the switch statement didn't.
 	return DefWindowProc(hWnd, message, wParam, lParam);
 }
