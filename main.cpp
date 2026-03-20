@@ -197,6 +197,7 @@ private:
 	// Scene properties
 	XMVECTOR m_clearColor;
 	bool m_showUi;
+	bool m_spotlightEnabled = false;
 
 	void LoadPipeline();
 	void LoadAssets();
@@ -695,6 +696,7 @@ void D3DAppImpl::LoadAssets()
 		// Create the textures and SRVs
 		{
 			auto LoadTextureAndCreateSrv = [&](const std::wstring& path,
+				WIC_FLAGS wicFlags,
 				ComPtr<ID3D12Resource>& texture,
 				ComPtr<ID3D12Resource>& uploadHeap)
 				{
@@ -703,7 +705,7 @@ void D3DAppImpl::LoadAssets()
 
 					ThrowIfFailed(LoadFromWICFile(
 						path.c_str(),
-						WIC_FLAGS_FORCE_RGB,
+						wicFlags,
 						&metadata,
 						scratchImage
 					));
@@ -751,8 +753,6 @@ void D3DAppImpl::LoadAssets()
 
 					UpdateSubresources(m_commandList.Get(), texture.Get(), uploadHeap.Get(), 0, 0, subresourceCount, subresources.data());
 
-					// No barrier here — batched below after both textures are uploaded
-
 					D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 					srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 					srvDesc.Format = metadata.format;
@@ -761,7 +761,6 @@ void D3DAppImpl::LoadAssets()
 					srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
 					srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
 
-					// Use captured handle directly — srvHandleOut was just a redundant copy of it
 					m_device->CreateShaderResourceView(texture.Get(), &srvDesc, handle);
 					handle.Offset(1, m_heapDescriptorSize);
 				};
@@ -769,8 +768,8 @@ void D3DAppImpl::LoadAssets()
 			const std::wstring diffusePath = GetAssetFullPath(L"Textures\\container.png");
 			const std::wstring specularPath = GetAssetFullPath(L"Textures\\container_specular.png");
 
-			LoadTextureAndCreateSrv(diffusePath, m_texture, textureUploadHeapDiffuse);
-			LoadTextureAndCreateSrv(specularPath, m_specularTexture, textureUploadHeapSpecular);
+			LoadTextureAndCreateSrv(diffusePath, WIC_FLAGS_FORCE_SRGB, m_texture, textureUploadHeapDiffuse);
+			LoadTextureAndCreateSrv(specularPath, WIC_FLAGS_NONE, m_specularTexture, textureUploadHeapSpecular);
 
 			// Batch both COPY_DEST → PIXEL_SHADER_RESOURCE transitions in one call
 			// (same principle as batching vertex + index buffer barriers)
@@ -1123,8 +1122,12 @@ void D3DAppImpl::OnUpdate(const Timer& timer)
 			0.0f);
 		m_lightDataConstantBufferData[i].spotLight.attenuation = XMFLOAT4(1.0f, 0.09f, 0.032f, 0.0f);
 		m_lightDataConstantBufferData[i].spotLight.ambient = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
-		m_lightDataConstantBufferData[i].spotLight.diffuse = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-		m_lightDataConstantBufferData[i].spotLight.specular = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+		m_lightDataConstantBufferData[i].spotLight.diffuse = m_spotlightEnabled
+			? XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f)
+			: XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
+		m_lightDataConstantBufferData[i].spotLight.specular = m_spotlightEnabled
+			? XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f)
+			: XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
 
 		m_lightDataConstantBufferData[i].pointLightCount = LightSourceCount;
 	}
@@ -1254,6 +1257,12 @@ void D3DAppImpl::OnKeyUp(UINT8 key)
 		}
 
 		SetCursorCaptured(!m_showUi);
+		break;
+	case 'F':
+		if (!m_showUi)
+		{
+			m_spotlightEnabled = !m_spotlightEnabled;
+		}
 		break;
 	case 'W':
 		m_moveForward = false;

@@ -95,7 +95,10 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     result += CalcSpotLight(spotLight, norm, input.worldPos, viewDir, input.uv);
 
-    return float4(result, 1.0f);
+    const float gamma = 2.2f;
+    float3 gammaCorrected = pow(saturate(result), 1.0f / gamma);
+
+    return float4(gammaCorrected, 1.0f);
 }
 
 float3 CalcDirLight(DirectionalLight light, float3 normal, float3 viewDir, float2 uv)
@@ -106,8 +109,8 @@ float3 CalcDirLight(DirectionalLight light, float3 normal, float3 viewDir, float
     float3 lightDir = normalize(-light.direction.xyz);
     float diff = max(dot(normal, lightDir), 0.0f);
 
-    float3 reflectDir = reflect(-lightDir, normal);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 64.0f);
+    float3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(viewDir, halfwayDir), 0.0f), 0.6f * 128.0f);
 
     float3 ambient = light.ambient.rgb * albedo;
     float3 diffuse = light.diffuse.rgb * diff * albedo;
@@ -124,8 +127,8 @@ float3 CalcPointLight(PointLight light, float3 normal, float3 fragPos, float3 vi
     float3 lightDir = normalize(light.position.xyz - fragPos);
     float diff = max(dot(normal, lightDir), 0.0f);
 
-    float3 reflectDir = reflect(-lightDir, normal);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 64.0f);
+    float3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(viewDir, halfwayDir), 0.0f), 0.6f * 128.0f);
 
     float distanceToLight = length(light.position.xyz - fragPos);
     float attenuation =
@@ -152,8 +155,8 @@ float3 CalcSpotLight(SpotLight light, float3 normal, float3 fragPos, float3 view
     float3 lightDir = normalize(light.position.xyz - fragPos);
     float diff = max(dot(normal, lightDir), 0.0f);
 
-    float3 reflectDir = reflect(-lightDir, normal);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0f), 64.0f);
+    float3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(viewDir, halfwayDir), 0.0f), 0.6f * 128.0f);
 
     float distanceToLight = length(light.position.xyz - fragPos);
     float attenuation =
